@@ -46,11 +46,21 @@ Pack a directory:
 ggufpacker pack ./Llama-3.2-1B-Instruct-GGUF -o llama-1b.ggufpack --llama-quantize /path/to/llama-quantize
 ```
 
+Once the pack has completed — every plan proven at pack time — you can let it delete the originals in the same command. `--prune` removes the quant files the pack can regenerate (each deletion is re-verified against the pack first; source F16/BF16 and imatrix files are never deleted), and `--keep` holds back the quants you actually run:
+
+```
+ggufpacker pack ./Llama-3.2-1B-Instruct-GGUF -o llama-1b.ggufpack --prune --keep Q4_K_M
+```
+
 Inspect what was stored:
 
 ```
 ggufpacker stats llama-1b.ggufpack
 ```
+
+### Multi-model directories
+
+A directory can hold several models' ladders at once — "pack your whole models folder". Files are grouped by tensor identity (the names + shapes in the GGUF header), and each quant is matched to *its own* model's F16 source; per-model imatrix files associate by filename prefix. When two sources are indistinguishable even by tensor identity (a base model and a finetune with identical tensor maps), the filename prefix breaks the tie, and anything still ambiguous is stored as a whole-file blob rather than guessed — never wrong, worst case stored bigger. `stats` shows per-model subtotals for such packs, and `--keep Q4_K_M` keeps every model's Q4_K_M.
 
 Regenerate a single quant (by type or by filename). Output is always sha256-verified against the original; ggufpacker refuses to emit a file on mismatch:
 
@@ -65,6 +75,8 @@ llama-server -m $(ggufpacker get llama-1b.ggufpack Q4_K_M)
 ```
 
 Repeat calls serve straight from the cache after an integrity rehash (~1–2 s per GB; that rehash is the guarantee the path holds verified bytes). `ggufpacker exec llama-1b.ggufpack Q4_K_M -- llama-cli -m {} -p "hi"` does the same and runs the command, substituting `{}` with the cached path (appended as the last argument if no `{}` is present) and propagating its exit code. Inspect or reclaim space with `ggufpacker cache ls` / `ggufpacker cache clear [--pack PACK]`.
+
+The cache can also keep itself under a size cap: `ggufpacker cache prune --max-size 20G` evicts least-recently-used files (by mtime, which every hit touches) until the total fits, and setting `GGUFPACKER_CACHE_MAX=20G` applies the same eviction automatically at the end of every `get` — after materializing, and never evicting the file `get` is about to return.
 
 Re-verify the whole store end to end:
 

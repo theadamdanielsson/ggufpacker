@@ -1,11 +1,46 @@
 # ggufpacker v0 status
 
-Updated: 2026-07-06
+Updated: 2026-07-06 (v0.3.0)
 
 ## Done
 
 - `pack` / `unpack` / `stats` / `verify` CLI (`ggufpacker` entry point), exit
   code 2 on any verification refusal.
+- **Multi-model directories (v0.3)**: files group by tensor identity (the
+  set of tensor names + shapes in the GGUF header — types differ between a
+  quant and its source, names/shapes do not), and each quant matches the
+  F32/F16/BF16 source sharing its identity, so one directory can hold many
+  models' ladders. Identical-identity twin sources (base vs abliterated
+  finetune: same tensor maps) resolve only on filename-prefix affinity
+  (exact model stem first, then longest common prefix, unique winner
+  required); anything still ambiguous falls back to a blob with a log line —
+  never guessed. imatrix files associate per model by stem containment (a
+  lone imatrix beside a lone model still applies unconditionally; models
+  without one pack without one). Manifest entries carry per-file
+  source/imatrix references (older packs fall back to the single source);
+  `stats` shows per-model subtotals when a pack holds several sources.
+  Also fixed en route: EXACT recipe-only plans that use an imatrix now pin
+  the original header, because the header embeds the machine-local imatrix
+  path whose length shifts every offset at unpack time.
+- **`pack --prune --keep TYPE[,TYPE...]` (v0.3)**: after the pack completes —
+  every EXACT/NEAR plan already round-trip-proven at pack time, pack()
+  raising on any failure — the originals are deleted. `--keep` types are
+  matched with the same suffix-first logic as unpack-by-type and keep every
+  match (one per model in a multi-model pack); source F16/BF16 and imatrix
+  files are never deleted; skipped files are never touched; blob-plan files
+  ARE deleted (the blob is the file, stored losslessly) but only after a
+  full re-extraction + sha256 proof. Belt and braces before any deletion:
+  on-disk manifest must equal the in-process one, originals must still hash
+  to their packed sha256, referenced blobs must hash to their content
+  address — any failure refuses (exit 2) and deletes nothing. Prints each
+  deleted file and total space freed. `--prune` without a completed
+  verified pack is impossible by construction (it only exists on `pack`).
+- **Cache LRU size cap (v0.3)**: `cache prune --max-size N[G|M]` evicts
+  least-recently-used cached files (mtime ascending; hits touch mtime)
+  until the cache fits, reporting evictions + space freed. Setting
+  `GGUFPACKER_CACHE_MAX` applies the same eviction automatically at the end
+  of every `get` — after materializing, never evicting the file `get` is
+  about to return.
 - Cache-on-demand (v0.2): `get` materializes an entry into
   `$GGUFPACKER_CACHE` (default `~/.cache/ggufpacker`)/`<manifest-sha256>`/ and
   prints only the verified absolute path on stdout, so
@@ -40,7 +75,7 @@ Updated: 2026-07-06
 - Manifest records: filename/size/sha256/plan/recipe flags per file, plus
   llama-quantize identity (path, sha256, best-effort build banner). Unpack
   warns when the binary differs from the packer's.
-- Tests: 46 passing (`pytest -q`). Synthetic 1-layer llama F16 (~1.8 MB, built
+- Tests: 108 passing (`pytest -q`). Synthetic 1-layer llama F16 (~1.8 MB, built
   with gguf-py's GGUFWriter, accepted by llama-quantize b3821) plus a
   synthetic legacy-format imatrix. Coverage: EXACT round-trip (Q8_0, Q4_K_M),
   NEAR round-trip (flipped payload bytes restored bit-exact),
@@ -57,6 +92,19 @@ Updated: 2026-07-06
   listing and `clear` (all, by pack path, by recorded name after the pack is
   deleted). Quantize-dependent tests skip gracefully if the b3821 binary
   disappears.
+  v0.3 coverage: a second synthetic architecture (2 layers, 512 embd) packed
+  in one directory with the first — each quant matched to its own source,
+  round-tripped, verified, per-model stats grouping, by-type ambiguity;
+  identical-tensor-map twin sources resolved by filename prefix (including
+  the base/base-abliterated longest-prefix trap) and blob-fallback with a
+  log line when no affinity exists; per-model imatrix association (model
+  without imatrix must not inherit its neighbor's); pre-0.3 manifest
+  back-compat. Prune: keep/source/imatrix/skipped survival, blob-plan
+  deletion, freed-bytes report, refusal on changed originals / manifest
+  drift / corrupt blobs (deleting nothing), multi-model --keep, exit-code
+  mapping. Cache LRU: parse_size, eviction order by mtime, protected file
+  never evicted, emptied pack-dir cleanup, CLI reporting, env-var cap on
+  hits and misses, invalid cap ignored with a warning.
 
 ## Not done (v0 scope cuts, deliberate)
 
@@ -71,29 +119,38 @@ Updated: 2026-07-06
 - Recipe search beyond histogram candidates (e.g. trying `--pure`,
   `--leave-output-tensor`).
 
-## Done since: real-repo integration run
+## Done since: real-repo integration runs
 
-Packed the full 17-quant `bartowski/Llama-3.2-1B-Instruct-GGUF` ladder:
-**19 files, 16.0 GB -> 1.8 GB (8.7x), manifest 12.4 KB.** Originals deleted,
-all 17 quants regenerated from the pack and sha256-verified against the
-original Hugging Face files (17/17, 283 s total). One EXACT (`Q8_0`),
+Packed the full 17-quant `bartowski/Llama-3.2-1B-Instruct-GGUF` ladder
+(v0.2): **19 files, 16.0 GB -> 1.8 GB (8.7x), manifest 12.4 KB.** Originals
+deleted, all 17 quants regenerated from the pack and sha256-verified against
+the original Hugging Face files (17/17, 283 s total). One EXACT (`Q8_0`),
 sixteen NEAR (deltas 1.8-6.6 MB), zero blob fallbacks — including the
 deprecated `Q4_0_4_x` repack types and all `_L`/`_XL` override variants.
 
+**v0.3 multi-model validation (2026-07-06)**: one directory holding TWO real
+published models — `bartowski/Llama-3.2-1B-Instruct-GGUF` (f16 + imatrix +
+Q8_0 + Q4_K_M) and `bartowski/SmolLM2-135M-Instruct-GGUF` (f16 + imatrix +
+Q8_0 + Q4_K_M) — packed with llama-quantize b3821. Every quant matched its
+own model's source (manifest `source`/`imatrix` references correct for all
+four), zero blob fallbacks, `stats` grouped per model with subtotals
+(8 files, 4.8 GB -> 2.0 GB, 2.4x — ratio dominated by the two F16 source
+blobs; the four quants alone stored 2.2 GB -> 7.4 MB). All four quants
+reconstructed sha256-identical to the Hugging Face originals. Notable:
+SmolLM2's repo pins llama.cpp b3991, not our b3821 — its Q8_0 still packed
+EXACT (payloads identical, header patch) and its Q4_K_M landed NEAR with a
+0.048% delta, so the pinned-build mismatch cost kilobytes, not a blob.
+`pack --prune --keep Q4_K_M` was validated separately on real file copies:
+it deleted only Q8_0 (138.1 MB freed, reported per file), kept the --keep
+quant + source + imatrix, and the deleted file was then restored bit-exact
+from the pack. `GGUFPACKER_CACHE_MAX=1M` evicted the LRU cached file at the
+end of `get` while never evicting the file being returned.
+
 ## Next
 
-- **Multi-model directories**: match each quant to its own F16 source by
-  tensor identity (names/shapes) instead of assuming one source per
-  directory — "pack your whole models folder". Today a second model's
-  ladder falls back to blobs (lossless but no ratio win).
-- `pack --prune --keep <types>`: after a verified pack, delete originals
-  except the quants you actually run.
 - Finetune/variant deltas (e.g. abliterated vs base) via weight-level
   delta compression — different discipline, tracked but not scheduled.
-
-- LRU size cap for the on-demand cache (`cache` prune to a max total size,
-  evicting by last-used mtime) — v0.3.
-- Wire the real-repo round-trip as an opt-in `pytest -m realrepo` job.
 - Single-file `.ggufpack` archive format.
 - Revisit portable packs once an upstream deterministic-quantization build
   mode exists.
+- Wire the real-repo round-trip as an opt-in `pytest -m realrepo` job.
