@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-FORMAT = "ggufpacker/0"
+FORMAT = "ggufpack/0"
 MANIFEST_NAME = "manifest.json"
 
 # Plans (never lossy — blob fallback is mandatory for anything unmatchable):
