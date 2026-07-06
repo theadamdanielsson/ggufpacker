@@ -1,8 +1,23 @@
 # ggufpacker
 
-Pack a directory of GGUF quantizations into a compact store, and reconstruct every file bit-exact on demand.
+Check that a GGUF quant is actually what it claims to be — and store whole quant ladders as recipes instead of files. Same machinery for both: a quant is a deterministic function of its F16 source, so it can be re-derived and byte-compared instead of trusted.
 
-**16.0 GiB -> 1.8 GiB, 8.7x** on a real published repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files, one `.ggufpack` store, manifest 12.4 KiB. Exact bytes: 17,157,953,114 -> 1,964,806,736 (8.73x). Originals deleted, all 17 quants regenerated from the pack, 17/17 sha256 identical to the original Hugging Face files, in 283 seconds.
+## Prove a quant derives from its base model
+
+Today there is no way to check that a published quant was honestly produced from the model it names. That gap is exploitable: a quant can behave clean in full precision and only misbehave after quantization ([Egashira et al., ICML 2025](https://arxiv.org/abs/2505.23786) — 88.7% success injecting insecure code this way). Signing doesn't close it (it proves who uploaded the bytes, not where they came from), and statistical fingerprinting says "probably derived", not "this file is exactly what the recipe produces".
+
+`attest` closes it for artifacts published from now on. It re-derives the quant from its source, byte-compares, and only on a sha256 match writes an [in-toto statement](docs/derivation-attestation.md) recording the derivation. `verify-attestation` re-runs the recipe and refuses on any mismatch — a poisoned or modified quant fails verification:
+
+```
+ggufpacker attest model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
+ggufpacker verify-attestation model-Q4_K_M.gguf.derivation.json
+```
+
+This works across machines, not just on the attester's box: quantization is bit-reproducible across OS/arch/compiler with a one-flag build change (proposed upstream in [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353)). The whole loop runs on public CI in [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism): a statement attested on macOS/arm64/clang is verified bit-exact on Linux/x86_64/gcc from the statement plus the public F16 alone — the 770 MB quant file is never transferred — and a tampered statement is refused. Limits and the imatrix portability rule are in the [spec](docs/derivation-attestation.md); the main one: old quants can't be attested (they were built with FP contraction on, on unknown machines), so the verifiable corpus starts with what gets published deterministically from here.
+
+## Pack a ladder: 16.0 GiB -> 1.8 GiB, every file back bit-exact
+
+The same fact — quants re-derive from the F16 — means there is no reason to store 15-25 near-duplicate files. Measured on a real published repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files, one `.ggufpack` store, manifest 12.4 KiB. Exact bytes: 17,157,953,114 -> 1,964,806,736 (8.73x). Originals deleted, all 17 quants regenerated from the pack, 17/17 sha256 identical to the original Hugging Face files, in 283 seconds.
 
 | File | Original | Plan | Stored | Recipe |
 |------|---------:|------|-------:|--------|
@@ -27,10 +42,6 @@ Pack a directory of GGUF quantizations into a compact store, and reconstruct eve
 | Q8_0 | 1.2 GiB | EXACT | 1.8 MiB | |
 
 ![demo](https://raw.githubusercontent.com/theadamdanielsson/ggufpacker/main/docs/demo.gif)
-
-## Why this works
-
-A publisher ships 15-25 quant variants per model. Every one of them is a deterministic function of a single F16 source: run `llama-quantize` with a given type (and, for k-quants, an imatrix) and you get that variant back. So there is no reason to store 16 GB of near-duplicate weights. ggufpacker stores the F16 source once, plus a tiny recipe per file and a small zstd "correction delta", and regenerates each quant on demand.
 
 ## Quickstart
 
@@ -88,23 +99,14 @@ ggufpacker verify llama-1b.ggufpack
 
 ### Derivation attestations
 
-`attest` re-derives a quant from its source, byte-compares, and only on a
-sha256 match writes an [in-toto Statement](docs/derivation-attestation.md)
-recording the derivation: source digest, imatrix digest, recipe, build
-identity, output digest. Anyone with the same llama-quantize build can then
-re-run the recipe and byte-compare, without having to trust the publisher:
-
-```
-ggufpacker attest model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
-ggufpacker verify-attestation model-Q4_K_M.gguf.derivation.json
-```
-
-Statistical fingerprinting (e.g. Cisco's Model Provenance Kit) tells you a
-quant *probably* derives from a base model, and works on any existing file.
-An attestation shows the derivation byte for byte, but only for artifacts
-quantized deterministically from now on — old quants carry contraction-era
-bytes that no recipe reproduces. Spec, the imatrix portability rule (it must
-be passed as a bare cwd-relative filename), and limitations:
+Covered up top; the statement records source digest, imatrix digest, recipe,
+build identity, and output digest. Two notes that matter in practice:
+statistical fingerprinting (e.g. Cisco's Model Provenance Kit) works on any
+existing file but says "probably derived" — an attestation is byte-exact but
+only exists for artifacts quantized deterministically from now on. And the
+imatrix must be passed as a bare cwd-relative filename when quantizing, or the
+artifact isn't portable (llama-quantize embeds the path string in the header;
+`attest` refuses and explains when it hits this). Full spec:
 [docs/derivation-attestation.md](docs/derivation-attestation.md).
 
 ## How it works
