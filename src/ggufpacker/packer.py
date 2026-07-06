@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from .blobs import BlobStore, sha256_file
+from .blobs import BlobCorruptError, BlobStore, sha256_file
 from .delta import xor_regions
 from .layout import GGUFLayout, GGUFParseError, parse_layout, read_header_bytes
 from .manifest import (
@@ -573,3 +573,131 @@ def _prove(entry: FileEntry, regen: Path, store: BlobStore) -> None:
     finally:
         tmp_out.unlink(missing_ok=True)
 
+
+# -- pack --prune ---------------------------------------------------------------
+
+
+class PruneError(RuntimeError):
+    """Prune could not run (e.g. a --keep type matches nothing)."""
+
+
+class PruneRefused(PruneError):
+    """A pre-deletion verification failed; nothing was deleted."""
+
+
+@dataclass
+class PruneResult:
+    deleted: list[tuple[str, int]] = field(default_factory=list)  # (filename, bytes)
+    kept: list[tuple[str, str]] = field(default_factory=list)  # (filename, reason)
+
+    @property
+    def freed(self) -> int:
+        return sum(size for _, size in self.deleted)
+
+
+def prune_originals(
+    input_dir: str | Path,
+    pack_dir: str | Path,
+    manifest: Manifest,
+    keep_types: list[str] | tuple[str, ...] = (),
+    log=_log,
+) -> PruneResult:
+    """Delete original quant files after a completed, fully verified pack.
+
+    Only reachable through `pack --prune`, which calls this with the manifest
+    a successful pack() just returned in the same process — pack() raises on
+    any failed plan, and every EXACT/NEAR plan it records has already been
+    round-trip-proven (_prove). So an unverified prune is impossible by
+    construction. Belt and braces, this still re-verifies before deleting:
+
+    - the on-disk manifest must equal the one pack() returned;
+    - each original file must still hash to its manifest sha256 (it has not
+      changed since it was packed);
+    - every referenced blob must hash to its content address;
+    - blob-plan files are fully re-extracted and compared by sha256 (their
+      deletion is safe because the blob IS the file, stored losslessly).
+
+    Never deleted: source F32/F16/BF16 files, imatrix files, anything named
+    in keep_types (matched with the same filename/suffix/recipe logic as
+    unpack-by-type; a type matching several files — e.g. one per model in a
+    multi-model pack — keeps all of them), and files the pack skipped.
+
+    All verification happens before the first deletion: on any failure
+    PruneRefused is raised and nothing has been deleted.
+    """
+    input_dir = Path(input_dir)
+    pack_dir = Path(pack_dir)
+
+    on_disk = Manifest.load(pack_dir)
+    if on_disk != manifest:
+        raise PruneRefused(
+            "pack manifest on disk does not match the pack just written; "
+            "refusing to prune"
+        )
+
+    keep_names: set[str] = set()
+    for t in keep_types:
+        matches = manifest.find_all(t)
+        if not matches:
+            raise PruneError(
+                f"--keep {t!r} matches no file in the pack; refusing to prune"
+            )
+        keep_names.update(f.filename for f in matches)
+
+    result = PruneResult()
+    to_delete: list[tuple[FileEntry, Path]] = []
+    for e in manifest.files:
+        if e.role != ROLE_QUANT:
+            result.kept.append((e.filename, e.role))
+            continue
+        if e.filename in keep_names:
+            result.kept.append((e.filename, "--keep"))
+            continue
+        p = input_dir / e.filename
+        if p.is_file():
+            to_delete.append((e, p))
+
+    store = BlobStore(pack_dir)
+    for e, p in to_delete:  # verify EVERYTHING before deleting ANYTHING
+        if sha256_file(p) != e.sha256:
+            raise PruneRefused(
+                f"{e.filename}: file changed since it was packed; refusing to prune"
+            )
+        for bid in e.stored_blob_ids():
+            try:
+                store._verify(bid)
+            except BlobCorruptError as exc:
+                raise PruneRefused(f"{e.filename}: {exc}; refusing to prune") from exc
+        if e.plan == PLAN_BLOB:
+            _verify_blob_roundtrip(store, e, pack_dir)
+        elif e.plan in (PLAN_EXACT, PLAN_NEAR):
+            if not e.recipe:
+                raise PruneRefused(
+                    f"{e.filename}: plan {e.plan} has no recipe; refusing to prune"
+                )
+            # round-trip proven at pack time (_prove); pack() raises otherwise
+        else:
+            raise PruneRefused(f"{e.filename}: unknown plan {e.plan!r}; refusing to prune")
+
+    for e, p in to_delete:
+        size = p.stat().st_size
+        p.unlink()
+        result.deleted.append((e.filename, size))
+        log(f"pruned {e.filename} ({size:,} B)")
+    return result
+
+
+def _verify_blob_roundtrip(store: BlobStore, entry: FileEntry, pack_dir: Path) -> None:
+    """Fully extract a blob-plan file and require its sha256 to match: the
+    proof that deleting the original loses nothing."""
+    with tempfile.NamedTemporaryFile(dir=pack_dir, delete=False) as tf:
+        tmp = Path(tf.name)
+    try:
+        store.extract_to(entry.blob, tmp)
+        if sha256_file(tmp) != entry.sha256:
+            raise PruneRefused(
+                f"{entry.filename}: stored blob does not reproduce the file; "
+                f"refusing to prune"
+            )
+    finally:
+        tmp.unlink(missing_ok=True)

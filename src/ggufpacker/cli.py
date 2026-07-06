@@ -37,6 +37,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="output pack directory")
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: $PATH lookup)")
+    p.add_argument("--prune", action="store_true",
+                   help="after the pack completes fully verified, delete the original "
+                   "quant files (source F16/BF16 and imatrix files are never deleted; "
+                   "every deletion is re-verified against the pack first)")
+    p.add_argument("--keep", metavar="TYPE[,TYPE...]",
+                   help="with --prune: quant types to keep on disk, matched like "
+                   "unpack-by-type (e.g. --keep Q4_K_M,Q8_0)")
 
     p = sub.add_parser("unpack", help="reconstruct one file from a pack")
     p.add_argument("pack", help="pack directory")
@@ -107,11 +114,17 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.cmd == "pack":
         from .packer import PackError, pack
 
+        keep = [t.strip() for t in (args.keep or "").split(",") if t.strip()]
+        if keep and not args.prune:
+            print("error: --keep requires --prune", file=sys.stderr)
+            return 1
         try:
-            pack(args.dir, args.output, llama_quantize=args.llama_quantize)
+            manifest = pack(args.dir, args.output, llama_quantize=args.llama_quantize)
         except PackError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        if args.prune:
+            return _prune_after_pack(args, manifest, keep)
         return 0
 
     if args.cmd == "unpack":
@@ -200,6 +213,29 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 2 if bad else 0
 
     raise AssertionError(f"unhandled command {args.cmd}")
+
+
+def _prune_after_pack(args: argparse.Namespace, manifest, keep: list[str]) -> int:
+    """pack --prune back half: delete verified originals, report exactly what
+    was deleted and how much space was freed. Only ever called right after a
+    successful pack() in this same process."""
+    from .packer import PruneError, PruneRefused, prune_originals
+    from .unpacker import human
+
+    try:
+        res = prune_originals(args.dir, args.output, manifest, keep)
+    except PruneRefused as e:
+        print(f"REFUSED: {e} (nothing was deleted)", file=sys.stderr)
+        return 2
+    except PruneError as e:
+        print(f"error: {e} (nothing was deleted)", file=sys.stderr)
+        return 1
+    for name, size in res.deleted:
+        print(f"deleted {name} ({human(size)})")
+    kept = ", ".join(f"{name} [{why}]" for name, why in res.kept)
+    print(f"pruned {len(res.deleted)} file(s), freed {human(res.freed)}"
+          + (f"; kept: {kept}" if kept else ""))
+    return 0
 
 
 def _cached_get(args: argparse.Namespace):
