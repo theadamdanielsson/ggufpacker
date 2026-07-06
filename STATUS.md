@@ -53,12 +53,18 @@ Updated: 2026-07-06
 - Recipe search beyond histogram candidates (e.g. trying `--pure`,
   `--leave-output-tensor`).
 
+## Done since: real-repo integration run
+
+Packed the full 17-quant `bartowski/Llama-3.2-1B-Instruct-GGUF` ladder:
+**19 files, 16.0 GB -> 1.8 GB (8.7x), manifest 12.4 KB.** Originals deleted,
+all 17 quants regenerated from the pack and sha256-verified against the
+original Hugging Face files (17/17, 283 s total). One EXACT (`Q8_0`),
+sixteen NEAR (deltas 1.8-6.6 MB), zero blob fallbacks — including the
+deprecated `Q4_0_4_x` repack types and all `_L`/`_XL` override variants.
+
 ## Next
 
-- Integration test on a real bartowski repo (Llama-3.2-1B-Instruct ladder)
-  once the development agent's pipeline finishes and disk frees — expect EXACT for
-  Q8_0/no-search types, NEAR elsewhere per the development measurements; wire it
-  as an opt-in `pytest -m realrepo` job.
-- Measure the stats money-shot on that repo (expected: ladder collapses to
-  F16 + imatrix + KB-scale deltas).
-- Then: single-file archive format, and revisit portability.
+- Wire the real-repo round-trip as an opt-in `pytest -m realrepo` job.
+- Single-file `.ggufpack` archive format.
+- Revisit portable packs once an upstream deterministic-quantization build
+  mode exists.

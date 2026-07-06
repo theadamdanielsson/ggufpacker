@@ -9,11 +9,15 @@ import pytest
 
 from tests.util_tinymodel import write_tiny_llama_f16
 
-# The development build of llama-quantize (b3821, arm64). Read-only; may disappear
-# when that scratchpad is cleaned — quantize-dependent tests then skip.
+# A llama-quantize binary (b3821 was used during development). Point
+# GGUFPACK_TEST_LLAMA_QUANTIZE at yours; quantize-dependent tests skip when
+# no binary is available.
 QBIN = Path(
-    "/private/tmp/local/-Users-adamdanielsson/work"
-    "/scratchpad/ggufpack-phase0/llama.cpp/build/bin/llama-quantize"
+    os.environ.get(
+        "GGUFPACK_TEST_LLAMA_QUANTIZE",
+        "/private/tmp/local/-Users-adamdanielsson/work"
+        "/scratchpad/ggufpack-phase0/llama.cpp/build/bin/llama-quantize",
+    )
 )
 
 
