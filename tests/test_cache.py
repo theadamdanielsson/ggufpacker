@@ -24,6 +24,7 @@ GARBAGE = bytes(range(256)) * 64
 def cache_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / "gpcache"
     monkeypatch.setenv("GGUFPACKER_CACHE", str(d))
+    monkeypatch.delenv("GGUFPACKER_CACHE_MAX", raising=False)  # no LRU cap here
     return d
 
 

@@ -22,15 +22,23 @@ Integrity contract, same as unpack's: no unverified path is ever emitted.
 - Cache miss: reconstructed through the same verify-or-refuse machinery as
   `unpack` (ReconstructError, CLI exit 2, on any mismatch), written to a temp
   file in the cache directory and atomically renamed into place.
+
+Size cap: `cache prune --max-size N[G|M]` evicts least-recently-used files
+(by mtime, which every hit touches) until the cache fits. Setting
+$GGUFPACKER_CACHE_MAX applies the same eviction automatically at the END of
+every `get`, after materializing — the file whose path is about to be
+returned is never evicted.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .blobs import sha256_file
@@ -38,6 +46,7 @@ from .manifest import MANIFEST_NAME, Manifest
 from .unpacker import Unpacker, human
 
 META_NAME = ".pack.json"  # per-pack cache metadata; never a model filename
+CACHE_MAX_ENV = "GGUFPACKER_CACHE_MAX"
 
 
 def cache_root() -> Path:
@@ -79,7 +88,9 @@ def get(pack_dir: str | Path, name: str, llama_quantize: str | None = None, log=
         if sha256_file(cached) == entry.sha256:
             os.utime(cached)  # recency for `cache ls`
             log(f"{entry.filename}: cache hit ({entry.size:,} B, sha256 verified)")
-            return cached.resolve()
+            result = cached.resolve()
+            _env_prune(result, log)
+            return result
         log(f"{entry.filename}: cached copy failed sha256; discarding and re-materializing")
         cached.unlink()
 
@@ -92,7 +103,26 @@ def get(pack_dir: str | Path, name: str, llama_quantize: str | None = None, log=
         os.replace(tmp, cached)
     finally:
         tmp.unlink(missing_ok=True)
-    return cached.resolve()
+    result = cached.resolve()
+    _env_prune(result, log)
+    return result
+
+
+def _env_prune(protect: Path, log) -> None:
+    """Honor $GGUFPACKER_CACHE_MAX at the end of every get: evict after
+    materializing, never evicting the file just returned."""
+    raw = os.environ.get(CACHE_MAX_ENV)
+    if not raw:
+        return
+    try:
+        max_bytes = parse_size(raw)
+    except ValueError as e:
+        log(f"WARNING: ignoring {CACHE_MAX_ENV}: {e}")
+        return
+    stats = prune_to_size(max_bytes, protect=protect)
+    if stats.evicted:
+        log(f"cache over {raw}: evicted {len(stats.evicted)} file(s), "
+            f"freed {human(stats.freed)} (LRU), {human(stats.remaining)} cached")
 
 
 def _write_meta(cdir: Path, pack_dir: Path, ident: str) -> None:
@@ -139,6 +169,69 @@ def ls_table() -> str:
     lines.append("")
     lines.append(f"{len(rows)} file(s), {human(total)} total   ({root})")
     return "\n".join(lines)
+
+
+# -- cache prune (LRU size cap) --------------------------------------------------
+
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)B?\s*$", re.IGNORECASE)
+_SIZE_MULT = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+def parse_size(s: str) -> int:
+    """'20G' -> bytes; accepts N, N[K|M|G|T], optional trailing B, any case."""
+    m = _SIZE_RE.match(s)
+    if not m:
+        raise ValueError(f"invalid size {s!r} (expected e.g. 20G, 500M, 1048576)")
+    return int(float(m.group(1)) * _SIZE_MULT[m.group(2).upper()])
+
+
+@dataclass
+class PruneStats:
+    evicted: list[tuple[Path, int]] = field(default_factory=list)  # (path, bytes)
+    remaining: int = 0  # cache size after eviction
+
+    @property
+    def freed(self) -> int:
+        return sum(size for _, size in self.evicted)
+
+
+def prune_to_size(max_bytes: int, protect: Path | None = None) -> PruneStats:
+    """Evict least-recently-used cached files (mtime ascending; every `get`
+    hit touches mtime) until the cache total is <= max_bytes.
+
+    `protect` (the file a `get` is about to return) is never evicted, even if
+    it alone exceeds the cap. Pack directories left with no model files are
+    removed along with their metadata.
+    """
+    root = cache_root()
+    entries: list[tuple[float, int, Path]] = []
+    total = 0
+    if root.is_dir():
+        for cdir in (p for p in root.iterdir() if p.is_dir()):
+            for f in (p for p in cdir.iterdir()
+                      if p.is_file() and not p.name.startswith(".")):
+                st = f.stat()
+                total += st.st_size
+                entries.append((st.st_mtime, st.st_size, f))
+
+    prot = protect.resolve() if protect is not None else None
+    stats = PruneStats()
+    for _mtime, size, f in sorted(entries, key=lambda e: e[0]):
+        if total <= max_bytes:
+            break
+        if prot is not None and f.resolve() == prot:
+            continue
+        f.unlink()
+        total -= size
+        stats.evicted.append((f, size))
+    stats.remaining = total
+
+    if stats.evicted and root.is_dir():  # drop pack dirs holding only metadata
+        for cdir in (p for p in root.iterdir() if p.is_dir()):
+            if not any(p.is_file() and not p.name.startswith(".")
+                       for p in cdir.iterdir()):
+                shutil.rmtree(cdir)
+    return stats
 
 
 # -- cache clear ---------------------------------------------------------------

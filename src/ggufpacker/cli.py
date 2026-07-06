@@ -84,13 +84,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: path recorded in the pack)")
 
-    p = sub.add_parser("cache", help="inspect or clear the on-demand cache")
+    p = sub.add_parser("cache", help="inspect, clear or size-cap the on-demand cache")
     csub = p.add_subparsers(dest="cache_cmd", required=True)
     csub.add_parser("ls", help="list cached files (pack, file, size, last used)")
     c = csub.add_parser("clear", help="remove all cached files, or one pack's")
     c.add_argument("--pack", metavar="PACK",
                    help="only remove this pack's entries (pack directory path, "
                    "recorded pack name, or cache identity prefix)")
+    c = csub.add_parser(
+        "prune",
+        help="evict least-recently-used files until the cache fits a size cap",
+        description="Evict least-recently-used cached files (by mtime, which every "
+        "`get` hit touches) until the total is at most SIZE. Set $GGUFPACKER_CACHE_MAX "
+        "to apply the same eviction automatically at the end of every `get` (the file "
+        "`get` returns is never evicted).",
+    )
+    c.add_argument("--max-size", required=True, metavar="N[G|M]",
+                   help="size cap, e.g. 20G, 500M, or plain bytes")
 
     p = sub.add_parser("stats", help="show per-file plans, stored cost and ratio")
     p.add_argument("pack", help="pack directory")
@@ -171,7 +181,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 128 - child if child < 0 else child  # -SIGTERM -> 143, shell style
 
     if args.cmd == "cache":
-        from .cache import clear, ls_table
+        from .cache import clear, ls_table, parse_size, prune_to_size
+        from .unpacker import human
 
         if args.cache_cmd == "ls":
             print(ls_table())
@@ -182,6 +193,18 @@ def _dispatch(args: argparse.Namespace) -> int:
                 print(f"error: nothing cached for {args.pack!r}", file=sys.stderr)
                 return 1
             print(f"removed {n} cached pack(s)")
+            return 0
+        if args.cache_cmd == "prune":
+            try:
+                max_bytes = parse_size(args.max_size)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            stats = prune_to_size(max_bytes)
+            for path, size in stats.evicted:
+                print(f"evicted {path.name} ({human(size)})")
+            print(f"evicted {len(stats.evicted)} file(s), freed {human(stats.freed)}; "
+                  f"cache now {human(stats.remaining)} (cap {args.max_size})")
             return 0
         raise AssertionError(f"unhandled cache command {args.cache_cmd}")
 
