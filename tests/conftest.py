@@ -10,15 +10,12 @@ import pytest
 from ggufpacker.manifest import FORMAT, FileEntry, Manifest
 from tests.util_tinymodel import write_tiny_llama_f16
 
-# A llama-quantize binary (b3821 was used during development). Point
-# GGUFPACK_TEST_LLAMA_QUANTIZE at yours; quantize-dependent tests skip when
-# no binary is available.
+# A llama-quantize binary from a llama.cpp build. Set
+# GGUFPACKER_TEST_LLAMA_QUANTIZE to point at yours; otherwise PATH is
+# searched. Quantize-dependent tests skip when no binary is available.
 QBIN = Path(
-    os.environ.get(
-        "GGUFPACK_TEST_LLAMA_QUANTIZE",
-        "/private/tmp/local/-Users-adamdanielsson/work"
-        "/scratchpad/ggufpack-phase0/llama.cpp/build/bin/llama-quantize",
-    )
+    os.environ.get("GGUFPACKER_TEST_LLAMA_QUANTIZE", "")
+    or (shutil.which("llama-quantize") or "/usr/local/bin/llama-quantize")
 )
 
 
