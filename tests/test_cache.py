@@ -235,6 +235,45 @@ def test_cache_clear_all_and_unknown_pack(blob_pack: Path, cache_env: Path, caps
     assert "nothing cached" in capsys.readouterr().err
 
 
+# ------------------------------------------------- by-type resolution
+
+def test_get_by_type_prefers_suffix_over_recipe_base(variant_pack: Path, qbin: str,
+                                                     capsys):
+    """Regression: Q4_K_L's recipe is base Q4_K_M + override, and L sorts
+    first; `get pack Q4_K_M` used to hand back the L file."""
+    capsys.readouterr()
+    rc = cli_main(["get", str(variant_pack), "Q4_K_M", "--llama-quantize", qbin])
+    assert rc == 0
+    path = Path(capsys.readouterr().out.strip())
+    assert path.name == "tiny-Q4_K_M.gguf"
+
+    rc = cli_main(["get", str(variant_pack), "Q4_K_L", "--llama-quantize", qbin])
+    assert rc == 0
+    path = Path(capsys.readouterr().out.strip())
+    assert path.name == "tiny-Q4_K_L.gguf"
+
+
+def test_get_ambiguous_type_exits_1_names_candidates(ambiguous_pack: Path, capsys):
+    capsys.readouterr()
+    rc = cli_main(["get", str(ambiguous_pack), "Q4_K_M"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == "", "no path may be printed on an ambiguous query"
+    assert "ambiguous type 'Q4_K_M'" in captured.err
+    assert "X-Q4_K_L.gguf" in captured.err and "X-Q4_K_XL.gguf" in captured.err
+    assert "use a filename" in captured.err
+
+
+def test_exec_ambiguous_type_short_circuits(ambiguous_pack: Path, tmp_path: Path,
+                                            capsys):
+    marker = tmp_path / "ran"
+    rc = cli_main(["exec", str(ambiguous_pack), "Q4_K_M",
+                   "--", "/bin/sh", "-c", f"touch {marker}"])
+    assert rc == 1
+    assert not marker.exists(), "child must not run on an ambiguous query"
+    assert "ambiguous type 'Q4_K_M'" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------- with quants
 
 def test_get_real_quant_by_type(model_dir: Path, tiny_quants: dict, tmp_path: Path,

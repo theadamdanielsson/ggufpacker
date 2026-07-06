@@ -115,6 +115,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 0
 
     if args.cmd == "unpack":
+        from .manifest import AmbiguousNameError
         from .unpacker import ReconstructError, Unpacker
 
         try:
@@ -126,7 +127,7 @@ def _dispatch(args: argparse.Namespace) -> int:
                           f"(have: {names})", file=sys.stderr)
                     return 1
                 u.reconstruct(entry, args.output)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, AmbiguousNameError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
         except ReconstructError as e:

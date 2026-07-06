@@ -194,6 +194,35 @@ def test_custom_variant_override_detection(
     _unpack_and_compare(pack_dir, "tiny-Q6_K_L.gguf", published, tmp_path / "out.gguf", qbin)
 
 
+@needs_quantize
+def test_unpack_by_type_prefers_suffix_over_recipe_base(
+    variant_pack: Path, model_dir: Path, tmp_path: Path, qbin: str
+):
+    """Regression: with tiny-Q4_K_L.gguf (recipe base Q4_K_M + override)
+    packed alongside tiny-Q4_K_M.gguf, unpack-by-type 'Q4_K_M' used to
+    resolve to the L file because recipes were matched before filenames."""
+    with Unpacker(variant_pack, llama_quantize=qbin) as u:
+        for qtype in ("Q4_K_M", "Q4_K_L"):
+            e = u.manifest.find(qtype)
+            assert e.filename == f"tiny-{qtype}.gguf"
+            out = tmp_path / f"out-{qtype}.gguf"
+            u.reconstruct(e, out)
+            assert out.read_bytes() == (model_dir / e.filename).read_bytes()
+
+
+def test_unpack_ambiguous_type_exits_1_names_candidates(
+    ambiguous_pack: Path, tmp_path: Path, capsys
+):
+    out = tmp_path / "out.gguf"
+    rc = cli_main(["unpack", str(ambiguous_pack), "Q4_K_M", "-o", str(out)])
+    assert rc == 1
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "ambiguous type 'Q4_K_M'" in err
+    assert "X-Q4_K_L.gguf" in err and "X-Q4_K_XL.gguf" in err
+    assert "use a filename" in err
+
+
 # ---------------------------------------------------------------- BLOB
 
 def test_blob_fallback_roundtrip(model_dir: Path, tmp_path: Path):

@@ -1,7 +1,8 @@
 """Cache-on-demand: materialize pack entries into a local cache, reuse them.
 
 `ggufpacker get` resolves an entry exactly like `unpack` (exact filename,
-then quant type, then filename-suffix match) and materializes it into
+then filename quant-suffix, then recipe base type; a type matching several
+entries is refused rather than guessed) and materializes it into
 
     $GGUFPACKER_CACHE (default ~/.cache/ggufpacker)/<pack identity>/<filename>
 
@@ -59,7 +60,8 @@ def _log(msg: str) -> None:
 def get(pack_dir: str | Path, name: str, llama_quantize: str | None = None, log=_log) -> Path:
     """Materialize one entry into the cache; return its absolute verified path.
 
-    Raises FileNotFoundError (no pack), LookupError (no matching entry) or
+    Raises FileNotFoundError (no pack), LookupError (no matching entry, or
+    AmbiguousNameError when a type matches several entries) or
     ReconstructError (reconstruction failed verification; nothing emitted).
     """
     pack_dir = Path(pack_dir)

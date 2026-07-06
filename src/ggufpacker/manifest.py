@@ -30,6 +30,10 @@ ROLE_IMATRIX = "imatrix"
 ROLE_QUANT = "quant"
 
 
+class AmbiguousNameError(LookupError):
+    """A type query matched several entries; the caller must use a filename."""
+
+
 @dataclass
 class FileEntry:
     filename: str
@@ -46,6 +50,11 @@ class FileEntry:
 
     def stored_blob_ids(self) -> list[str]:
         return [b for b in (self.header_blob, self.delta_blob, self.blob) if b]
+
+
+def _ambiguous(query: str, matches: list[FileEntry]) -> str:
+    names = ", ".join(sorted(f.filename for f in matches))
+    return f"ambiguous type {query!r}, candidates: {names}; use a filename"
 
 
 @dataclass
@@ -65,20 +74,43 @@ class Manifest:
         return next((f for f in self.files if f.role == ROLE_IMATRIX), None)
 
     def find(self, name_or_type: str) -> FileEntry | None:
-        """Match by exact filename first, then by recipe qtype (case-insensitive)."""
+        """Resolve a filename or quant type to exactly one entry.
+
+        Order: (1) exact filename; (2) quant-suffix match on the ORIGINAL
+        filename — `...-<TYPE>.gguf`, case-insensitive — which is the file's
+        own identity and works for blob-plan files with no recipe; (3) only
+        when no filename carries the suffix, recipe base-type match.
+
+        The suffix step must beat the recipe step: bartowski `_L`/`_XL`
+        variants share a recipe base type (Q4_K_L = base Q4_K_M + tensor-type
+        override), so matching recipes first made `Q4_K_M` resolve to
+        whichever variant happened to iterate first. Whenever a step matches
+        several entries, AmbiguousNameError is raised instead of picking one;
+        returns None when nothing matches at all.
+        """
         for f in self.files:
             if f.filename == name_or_type:
                 return f
         want = name_or_type.upper()
-        for f in self.files:
-            if f.recipe and f.recipe.get("qtype", "").upper() == want:
-                return f
-        # Last resort: filename suffix match, so `unpack pack Q4_K_L` works
-        # even for blob-plan files that have no recipe.
+
+        suffixed = []
         for f in self.files:
             stem = f.filename[:-5] if f.filename.endswith(".gguf") else f.filename
             if stem.upper().endswith("-" + want):
-                return f
+                suffixed.append(f)
+        if len(suffixed) == 1:
+            return suffixed[0]
+        if suffixed:
+            raise AmbiguousNameError(_ambiguous(name_or_type, suffixed))
+
+        by_recipe = [
+            f for f in self.files
+            if f.recipe and f.recipe.get("qtype", "").upper() == want
+        ]
+        if len(by_recipe) == 1:
+            return by_recipe[0]
+        if by_recipe:
+            raise AmbiguousNameError(_ambiguous(name_or_type, by_recipe))
         return None
 
     def save(self, pack_dir: str | Path) -> None:
