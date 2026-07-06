@@ -138,7 +138,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 0
 
     if args.cmd == "unpack":
-        from .manifest import AmbiguousNameError
+        from .manifest import AmbiguousNameError, ManifestError
         from .unpacker import ReconstructError, Unpacker
 
         try:
@@ -153,6 +153,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         except (FileNotFoundError, AmbiguousNameError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        except ManifestError as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
         except ReconstructError as e:
             print(f"REFUSED: {e}", file=sys.stderr)
             return 2
@@ -209,6 +212,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         raise AssertionError(f"unhandled cache command {args.cache_cmd}")
 
     if args.cmd == "stats":
+        from .manifest import ManifestError
         from .unpacker import stats_table
 
         try:
@@ -216,9 +220,13 @@ def _dispatch(args: argparse.Namespace) -> int:
         except FileNotFoundError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        except ManifestError as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
         return 0
 
     if args.cmd == "verify":
+        from .manifest import ManifestError
         from .unpacker import Unpacker
 
         try:
@@ -227,6 +235,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         except FileNotFoundError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
+        except ManifestError as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
         bad = 0
         for name, status in results:
             print(f"{'PASS' if status == 'OK' else 'FAIL'}  {name}"
@@ -265,6 +276,7 @@ def _cached_get(args: argparse.Namespace):
     """Shared get/exec front half: (exit_code, cached_path|None). Never emits
     an unverified path; failures mirror unpack (1 usage, 2 refusal)."""
     from .cache import get
+    from .manifest import ManifestError
     from .unpacker import ReconstructError
 
     try:
@@ -272,6 +284,9 @@ def _cached_get(args: argparse.Namespace):
     except (FileNotFoundError, LookupError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1, None
+    except ManifestError as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 2, None
     except ReconstructError as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 2, None

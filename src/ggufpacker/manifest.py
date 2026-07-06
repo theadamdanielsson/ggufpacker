@@ -34,6 +34,12 @@ class AmbiguousNameError(LookupError):
     """A type query matched several entries; the caller must use a filename."""
 
 
+class ManifestError(ValueError):
+    """manifest.json cannot be trusted: corrupt/truncated JSON, an unknown
+    format tag, or fields this version does not know (a newer ggufpacker).
+    Mapped to a clean refusal (exit 2) by the CLI — never a traceback."""
+
+
 @dataclass
 class FileEntry:
     filename: str
@@ -162,13 +168,26 @@ class Manifest:
         p = Path(pack_dir) / MANIFEST_NAME
         if not p.is_file():
             raise FileNotFoundError(f"not a ggufpacker: {p} missing")
-        data = json.loads(p.read_text())
-        if data.get("format") != FORMAT:
-            raise ValueError(f"unsupported pack format {data.get('format')!r}")
-        return cls(
-            format=data["format"],
-            created=data["created"],
-            tool_version=data["tool_version"],
-            quantize=data["quantize"],
-            files=[FileEntry(**f) for f in data["files"]],
-        )
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ManifestError(f"corrupt manifest.json in {pack_dir}: {e}") from e
+        fmt = data.get("format") if isinstance(data, dict) else None
+        if fmt != FORMAT:
+            raise ManifestError(
+                f"unsupported pack format {fmt!r} in {pack_dir} "
+                f"(this ggufpacker reads {FORMAT!r})"
+            )
+        try:
+            return cls(
+                format=data["format"],
+                created=data["created"],
+                tool_version=data["tool_version"],
+                quantize=data["quantize"],
+                files=[FileEntry(**f) for f in data["files"]],
+            )
+        except (KeyError, TypeError) as e:
+            raise ManifestError(
+                f"manifest.json in {pack_dir} is not readable by this ggufpacker "
+                f"({e}); was the pack written by a newer version?"
+            ) from e

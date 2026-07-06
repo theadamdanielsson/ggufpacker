@@ -1,8 +1,26 @@
 # ggufpacker v0 status
 
-Updated: 2026-07-06 (v0.3.0)
+Updated: 2026-07-06 (v0.3.1)
 
 ## Done
+
+- **Hardening (v0.3.1)**, from an adversarial self-audit before launch:
+  - `--prune` now verifies the **restore closure** of every EXACT/NEAR file
+    before deleting anything: the stored source blob (and imatrix blob when
+    the recipe uses one) is fully re-extracted and sha256-compared, not just
+    content-address-checked. Previously only the quant's own blobs were
+    verified, so bit-rot in the source blob could let prune delete an
+    original the pack could no longer regenerate.
+  - Corrupt, truncated, or newer-version `manifest.json` is now a clean
+    refusal (`ManifestError` -> exit 2 with a message) on every command;
+    previously stats/verify/unpack/get crashed with a raw traceback.
+  - `pack -o <existing regular file>` refuses cleanly instead of raising
+    `NotADirectoryError`.
+  - Originals are re-stat'd (size + mtime) immediately before deletion,
+    shrinking the verify-to-delete race window to microseconds.
+  - Tests: 116 passing (8 new: dependency-blob corruption refusals incl.
+    imatrix, missing-source refusal, manifest-error exit codes across all
+    read commands, pack-onto-file refusal).
 
 - `pack` / `unpack` / `stats` / `verify` CLI (`ggufpacker` entry point), exit
   code 2 on any verification refusal.
@@ -75,7 +93,9 @@ Updated: 2026-07-06 (v0.3.0)
 - Manifest records: filename/size/sha256/plan/recipe flags per file, plus
   llama-quantize identity (path, sha256, best-effort build banner). Unpack
   warns when the binary differs from the packer's.
-- Tests: 108 passing (`pytest -q`). Synthetic 1-layer llama F16 (~1.8 MB, built
+- Tests: 108 passing at v0.3.0, 116 at v0.3.1 (`pytest -q`; quantize-dependent
+  tests need `GGUFPACKER_TEST_LLAMA_QUANTIZE` or `llama-quantize` on PATH).
+  Synthetic 1-layer llama F16 (~1.8 MB, built
   with gguf-py's GGUFWriter, accepted by llama-quantize b3821) plus a
   synthetic legacy-format imatrix. Coverage: EXACT round-trip (Q8_0, Q4_K_M),
   NEAR round-trip (flipped payload bytes restored bit-exact),

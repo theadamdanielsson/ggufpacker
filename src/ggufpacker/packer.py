@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+import zstandard
+
 from . import __version__
 from .blobs import BlobCorruptError, BlobStore, sha256_file
 from .delta import xor_regions
@@ -46,6 +48,7 @@ from .manifest import (
     ROLE_SOURCE,
     FileEntry,
     Manifest,
+    ManifestError,
 )
 from .quantizer import QuantizeError, Quantizer
 from .recipe import (
@@ -109,6 +112,8 @@ def pack(
     out_pack = Path(out_pack)
     if not input_dir.is_dir():
         raise PackError(f"input is not a directory: {input_dir}")
+    if out_pack.exists() and not out_pack.is_dir():
+        raise PackError(f"output exists and is not a directory: {out_pack}")
     if out_pack.exists() and any(out_pack.iterdir()):
         raise PackError(f"output already exists and is not empty: {out_pack}")
     out_pack.mkdir(parents=True, exist_ok=True)
@@ -615,7 +620,10 @@ def prune_originals(
       changed since it was packed);
     - every referenced blob must hash to its content address;
     - blob-plan files are fully re-extracted and compared by sha256 (their
-      deletion is safe because the blob IS the file, stored losslessly).
+      deletion is safe because the blob IS the file, stored losslessly);
+    - the restore closure of every EXACT/NEAR file — the stored source blob
+      and, when the recipe uses one, the imatrix blob — is fully re-extracted
+      and compared by sha256 too, so regeneration provably has intact inputs.
 
     Never deleted: source F32/F16/BF16 files, imatrix files, anything named
     in keep_types (matched with the same filename/suffix/recipe logic as
@@ -628,7 +636,10 @@ def prune_originals(
     input_dir = Path(input_dir)
     pack_dir = Path(pack_dir)
 
-    on_disk = Manifest.load(pack_dir)
+    try:
+        on_disk = Manifest.load(pack_dir)
+    except ManifestError as exc:
+        raise PruneRefused(f"{exc}; refusing to prune") from exc
     if on_disk != manifest:
         raise PruneRefused(
             "pack manifest on disk does not match the pack just written; "
@@ -658,7 +669,10 @@ def prune_originals(
             to_delete.append((e, p))
 
     store = BlobStore(pack_dir)
+    witness: dict[str, tuple[int, int]] = {}  # filename -> (size, mtime_ns)
     for e, p in to_delete:  # verify EVERYTHING before deleting ANYTHING
+        st = p.stat()
+        witness[e.filename] = (st.st_size, st.st_mtime_ns)
         if sha256_file(p) != e.sha256:
             raise PruneRefused(
                 f"{e.filename}: file changed since it was packed; refusing to prune"
@@ -679,6 +693,46 @@ def prune_originals(
         else:
             raise PruneRefused(f"{e.filename}: unknown plan {e.plan!r}; refusing to prune")
 
+    # Restore closure: an EXACT/NEAR original is only safe to delete if the
+    # stored bytes its regeneration depends on — the source blob and, when
+    # the recipe uses one, the imatrix blob — provably reproduce those files.
+    # The content address only proves the COMPRESSED bytes are intact, so each
+    # dependency is fully extracted and hashed, once per referenced entry.
+    deps: dict[str, FileEntry] = {}
+    for e, _ in to_delete:
+        if e.plan not in (PLAN_EXACT, PLAN_NEAR):
+            continue
+        src = manifest.source_for(e)
+        if src is None:
+            raise PruneRefused(
+                f"{e.filename}: no source entry in the pack to regenerate from; "
+                f"refusing to prune"
+            )
+        deps[src.filename] = src
+        if e.recipe and e.recipe.get("use_imatrix"):
+            imx = manifest.imatrix_for(e)
+            if imx is None:
+                raise PruneRefused(
+                    f"{e.filename}: recipe uses an imatrix but the pack has none; "
+                    f"refusing to prune"
+                )
+            deps[imx.filename] = imx
+    for dep in deps.values():
+        if dep.plan != PLAN_BLOB or not dep.blob:
+            raise PruneRefused(
+                f"{dep.filename}: source/imatrix is not stored as a blob; "
+                f"refusing to prune"
+            )
+        _verify_blob_roundtrip(store, dep, pack_dir)
+
+    for e, p in to_delete:  # last-instant re-check, still before ANY deletion
+        st = p.stat()
+        if (st.st_size, st.st_mtime_ns) != witness[e.filename]:
+            raise PruneRefused(
+                f"{e.filename}: changed while the prune was verifying; "
+                f"refusing to prune"
+            )
+
     for e, p in to_delete:
         size = p.stat().st_size
         p.unlink()
@@ -693,7 +747,10 @@ def _verify_blob_roundtrip(store: BlobStore, entry: FileEntry, pack_dir: Path) -
     with tempfile.NamedTemporaryFile(dir=pack_dir, delete=False) as tf:
         tmp = Path(tf.name)
     try:
-        store.extract_to(entry.blob, tmp)
+        try:
+            store.extract_to(entry.blob, tmp)
+        except (BlobCorruptError, zstandard.ZstdError) as exc:
+            raise PruneRefused(f"{entry.filename}: {exc}; refusing to prune") from exc
         if sha256_file(tmp) != entry.sha256:
             raise PruneRefused(
                 f"{entry.filename}: stored blob does not reproduce the file; "

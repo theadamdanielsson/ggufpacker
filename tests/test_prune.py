@@ -197,6 +197,99 @@ def test_cli_maps_prune_refusal_to_exit_2(model_dir: Path, tmp_path: Path, capsy
     assert (model_dir / "tiny-MYSTERY.gguf").exists()
 
 
+def _synthetic_exact_pack(tmp_path: Path, use_imatrix: bool = False):
+    """A repo + pack built by hand: one blob-plan source (+ optional imatrix)
+    and one EXACT-plan quant that claims to regenerate from it. Lets the
+    restore-closure checks be exercised without a llama-quantize binary."""
+    import hashlib
+
+    from ggufpacker.blobs import BlobStore
+    from ggufpacker.manifest import FORMAT, FileEntry, Manifest
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    quant = b"PRETEND-QUANT-FILE-CONTENT" * 100
+    (repo / "m-Q4_K_M.gguf").write_bytes(quant)
+
+    pack_dir = tmp_path / "p.ggufpack"
+    pack_dir.mkdir()
+    store = BlobStore(pack_dir)
+    src = b"PRETEND-F16-SOURCE" * 500
+    src_blob = store.put_bytes(src, 3)
+    files = [
+        FileEntry(filename="m-f16.gguf", size=len(src),
+                  sha256=hashlib.sha256(src).hexdigest(),
+                  role="source", plan="blob", blob=src_blob),
+        FileEntry(filename="m-Q4_K_M.gguf", size=len(quant),
+                  sha256=hashlib.sha256(quant).hexdigest(),
+                  role="quant", plan="exact",
+                  recipe={"qtype": "Q4_K_M", "use_imatrix": use_imatrix},
+                  source="m-f16.gguf"),
+    ]
+    imx_blob = None
+    if use_imatrix:
+        imx = b"PRETEND-IMATRIX" * 200
+        imx_blob = store.put_bytes(imx, 3)
+        files.insert(1, FileEntry(
+            filename="m.imatrix", size=len(imx),
+            sha256=hashlib.sha256(imx).hexdigest(),
+            role="imatrix", plan="blob", blob=imx_blob,
+        ))
+        files[-1].imatrix = "m.imatrix"
+    m = Manifest(format=FORMAT, created="now", tool_version="test",
+                 quantize={"path": "x", "sha256": "y", "version": ""}, files=files)
+    m.save(pack_dir)
+    return repo, pack_dir, m, src_blob, imx_blob
+
+
+def _flip_byte(path: Path) -> None:
+    raw = bytearray(path.read_bytes())
+    raw[len(raw) // 2] ^= 0x01
+    path.write_bytes(bytes(raw))
+
+
+def test_prune_refuses_when_the_source_blob_is_corrupt(tmp_path: Path):
+    """An EXACT/NEAR original may only be deleted if the stored source blob it
+    would regenerate from provably reproduces the source. Bit-rot in that blob
+    must refuse the prune — the quant's own blobs alone are not the closure."""
+    repo, pack_dir, m, src_blob, _ = _synthetic_exact_pack(tmp_path)
+    _flip_byte(pack_dir / "blobs" / src_blob)
+    with pytest.raises(PruneRefused):
+        prune_originals(repo, pack_dir, m, [])
+    assert (repo / "m-Q4_K_M.gguf").exists(), "a refusal must delete nothing"
+
+
+def test_prune_refuses_when_the_imatrix_blob_is_corrupt(tmp_path: Path):
+    repo, pack_dir, m, _, imx_blob = _synthetic_exact_pack(tmp_path, use_imatrix=True)
+    _flip_byte(pack_dir / "blobs" / imx_blob)
+    with pytest.raises(PruneRefused):
+        prune_originals(repo, pack_dir, m, [])
+    assert (repo / "m-Q4_K_M.gguf").exists()
+
+
+def test_prune_refuses_when_the_pack_has_no_source_for_an_exact_plan(tmp_path: Path):
+    import hashlib
+
+    from ggufpacker.manifest import FORMAT, FileEntry, Manifest
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    quant = b"Q" * 100
+    (repo / "m-Q4_K_M.gguf").write_bytes(quant)
+    pack_dir = tmp_path / "p.ggufpack"
+    pack_dir.mkdir()
+    m = Manifest(format=FORMAT, created="now", tool_version="test",
+                 quantize={"path": "x", "sha256": "y", "version": ""},
+                 files=[FileEntry(filename="m-Q4_K_M.gguf", size=len(quant),
+                                  sha256=hashlib.sha256(quant).hexdigest(),
+                                  role="quant", plan="exact",
+                                  recipe={"qtype": "Q4_K_M"})])
+    m.save(pack_dir)
+    with pytest.raises(PruneRefused, match="no source entry"):
+        prune_originals(repo, pack_dir, m, [])
+    assert (repo / "m-Q4_K_M.gguf").exists()
+
+
 # --------------------------------------------------------------- source safety
 
 @needs_quantize
