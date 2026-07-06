@@ -6,6 +6,17 @@ Updated: 2026-07-06
 
 - `pack` / `unpack` / `stats` / `verify` CLI (`ggufpacker` entry point), exit
   code 2 on any verification refusal.
+- Cache-on-demand (v0.2): `get` materializes an entry into
+  `$GGUFPACKER_CACHE` (default `~/.cache/ggufpacker`)/`<manifest-sha256>`/ and
+  prints only the verified absolute path on stdout, so
+  `llama-server -m $(ggufpacker get pack Q4_K_M)` composes. Hits are
+  rehash-verified (~1-2 s/GB; the rehash is the integrity guarantee) and
+  touch mtime; corrupted cache entries are re-materialized, never served;
+  misses reconstruct atomically (temp file + rename) through the same
+  verify-or-refuse path as `unpack` (exit 2). `exec` runs a command with
+  every `{}` replaced by the cached path (appended when absent) and
+  propagates the child's exit code. `cache ls` / `cache clear [--pack]`
+  inspect and prune the cache.
 - Byte-level GGUF layout parser (v2/v3): header end, `general.alignment`
   handling (default 32), tensor-info table, data-region offsets. Own parser
   instead of gguf-py's reader because reconstruction needs an exact byte map.
@@ -29,7 +40,7 @@ Updated: 2026-07-06
 - Manifest records: filename/size/sha256/plan/recipe flags per file, plus
   llama-quantize identity (path, sha256, best-effort build banner). Unpack
   warns when the binary differs from the packer's.
-- Tests: 27 passing (`pytest -q`). Synthetic 1-layer llama F16 (~1.8 MB, built
+- Tests: 46 passing (`pytest -q`). Synthetic 1-layer llama F16 (~1.8 MB, built
   with gguf-py's GGUFWriter, accepted by llama-quantize b3821) plus a
   synthetic legacy-format imatrix. Coverage: EXACT round-trip (Q8_0, Q4_K_M),
   NEAR round-trip (flipped payload bytes restored bit-exact),
@@ -38,7 +49,14 @@ Updated: 2026-07-06
   override detection (Q6_K + token-embd q8_0), blob fallback (garbage file and
   recipe-less valid GGUF), corrupted-blob refusal with exit 2, manifest-hash
   refusal, unpack-by-type, stats output, layout/delta/recipe unit tests.
-  Quantize-dependent tests skip gracefully if the b3821 binary disappears.
+  Cache-on-demand coverage: miss materializes + verifies, hit skips
+  reconstruction (counted) + touches mtime, corrupted cache entry
+  re-materializes, corrupted pack refuses with exit 2 and prints no path,
+  `get` stdout purity (path + newline, byte-exact), `exec` `{}` substitution /
+  path-append / exit-code propagation / no-child-on-failure, `cache ls`
+  listing and `clear` (all, by pack path, by recorded name after the pack is
+  deleted). Quantize-dependent tests skip gracefully if the b3821 binary
+  disappears.
 
 ## Not done (v0 scope cuts, deliberate)
 
@@ -64,6 +82,8 @@ deprecated `Q4_0_4_x` repack types and all `_L`/`_XL` override variants.
 
 ## Next
 
+- LRU size cap for the on-demand cache (`cache` prune to a max total size,
+  evicting by last-used mtime) — v0.3.
 - Wire the real-repo round-trip as an opt-in `pytest -m realrepo` job.
 - Single-file `.ggufpack` archive format.
 - Revisit portable packs once an upstream deterministic-quantization build

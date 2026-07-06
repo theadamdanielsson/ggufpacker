@@ -58,6 +58,14 @@ Regenerate a single quant (by type or by filename). Output is always sha256-veri
 ggufpacker unpack llama-1b.ggufpack Q4_K_M -o Q4_K_M.gguf
 ```
 
+Or skip managing output files: `get` materializes the quant into a local cache (`~/.cache/ggufpacker`, override with `$GGUFPACKER_CACHE`) and prints the verified absolute path — and nothing else — on stdout, so it composes:
+
+```
+llama-server -m $(ggufpacker get llama-1b.ggufpack Q4_K_M)
+```
+
+Repeat calls serve straight from the cache after an integrity rehash (~1–2 s per GB; that rehash is the guarantee the path holds verified bytes). `ggufpacker exec llama-1b.ggufpack Q4_K_M -- llama-cli -m {} -p "hi"` does the same and runs the command, substituting `{}` with the cached path (appended as the last argument if no `{}` is present) and propagating its exit code. Inspect or reclaim space with `ggufpacker cache ls` / `ggufpacker cache clear [--pack PACK]`.
+
 Re-verify the whole store end to end:
 
 ```
@@ -115,7 +123,7 @@ No. Every emitted file is sha256-verified against the original, and ggufpacker r
 Because byte compressors get about 1.15x on quantized weights — they are already high-entropy. ggufpacker gets 8.7x because it does not compress the weights, it regenerates them from the source.
 
 **Can I run inference directly from a pack?**
-No. A pack is cold storage — unpack the quant you want (one command, sha256-verified) and point llama.cpp at the result, which is bit-identical to the original file. Practical pattern: keep your daily-driver quant unpacked, pack the ladder you rarely touch. A cache-on-demand runner (`ggufpacker exec`) is on the roadmap.
+Not directly — a pack is cold storage. But you no longer have to manage the unpacked files yourself: `ggufpacker get pack Q4_K_M` materializes the quant into a local cache (sha256-verified, reconstructed once) and prints its path, so `llama-server -m $(ggufpacker get pack Q4_K_M)` just works, and `ggufpacker exec pack Q4_K_M -- llama-cli -m {} -p "hi"` runs the command for you. The practical pattern still stands: keep your daily-driver quant unpacked (or cached), pack the ladder you rarely touch.
 
 **What about LoRA adapters or finetunes?**
 Different problem. Those are not deterministic re-quantizations of an F16 in the same directory, so they are out of scope for v0.
