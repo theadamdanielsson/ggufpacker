@@ -1,10 +1,10 @@
 # GGUF derivation attestation (v0)
 
-A small, verifiable claim: **this quant file derives bit-exactly from that
+A small, checkable claim: **this quant file derives bit-exactly from that
 base model via this recipe.** Not "probably derives" (statistical
 fingerprinting answers that), and not "somebody trustworthy published it"
-(signing answers that) — *provably derives*: anyone with the pinned
-llama-quantize build can re-run the recipe and byte-compare.
+(signing answers that): anyone with the pinned llama-quantize build can
+re-run the recipe and byte-compare.
 
 ```
 ggufpacker attest  model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
@@ -25,14 +25,14 @@ and proven on public CI (three compilers, three OSes, two architectures, one
 hash set per quant) in
 [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism).
 
-That makes quantization the one model transform where derivation can be
-*proven* today. Training and GPU inference are not bit-deterministic across
-hardware, which is exactly the obstacle recent proposals for
-"reproducible builds for AI" run into (see
+As far as I can tell that makes quantization the first model transform where
+derivation can be checked bit-exactly in practice. Training and GPU inference
+are not bit-deterministic across hardware, which is the obstacle recent
+proposals for "reproducible builds for AI" run into (see
 [arXiv:2606.03019](https://arxiv.org/abs/2606.03019),
-[arXiv:2606.00279](https://arxiv.org/abs/2606.00279) — both call for
+[arXiv:2606.00279](https://arxiv.org/abs/2606.00279) — both argue for
 bit-exact reconstructability from declared inputs; neither ships a
-mechanism). Quantization is the shippable slice.
+mechanism). Quantization is the piece that works today.
 
 ## The statement
 
@@ -117,11 +117,11 @@ Field semantics:
   sigstore-sign this statement and you have both. Signing is deliberately out
   of scope for ggufpacker v0.
 - **[Cisco Model Provenance Kit](https://github.com/cisco-ai-defense/model-provenance-kit)**
-  answers the same question statistically (weight fingerprints, no
-  cooperation from the publisher needed — works on any existing model).
-  This predicate answers it cryptographically, but only for artifacts
-  published with an attestation. Detection for the past, proof for the
-  future.
+  answers the same question statistically (weight fingerprints; needs no
+  cooperation from the publisher, works on any existing model). This
+  predicate answers it exactly, but only for artifacts published with an
+  attestation. Fingerprinting covers the models that already exist;
+  attestations only cover what gets published with one from here on.
 - **Hugging Face `base_model_relation: quantized`** declares this
   relationship; nothing verifies it. An attestation is the verifiable version
   of that model-card field.

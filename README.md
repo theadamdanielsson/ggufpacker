@@ -88,22 +88,23 @@ ggufpacker verify llama-1b.ggufpack
 
 ### Derivation attestations
 
-The same prove-or-refuse machinery, pointed outward: `attest` re-derives a
-quant from its source, byte-compares, and only on a sha256 match emits an
-[in-toto Statement](docs/derivation-attestation.md) recording the derivation —
-source digest, imatrix digest, recipe, build identity, output digest. Anyone
-can then re-run the recipe and byte-compare, no trust in the publisher needed:
+`attest` re-derives a quant from its source, byte-compares, and only on a
+sha256 match writes an [in-toto Statement](docs/derivation-attestation.md)
+recording the derivation: source digest, imatrix digest, recipe, build
+identity, output digest. Anyone with the same llama-quantize build can then
+re-run the recipe and byte-compare, without having to trust the publisher:
 
 ```
 ggufpacker attest model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
 ggufpacker verify-attestation model-Q4_K_M.gguf.derivation.json
 ```
 
-This is "probably derived" (statistical fingerprinting, e.g. Cisco's Model
-Provenance Kit) upgraded to "provably derived" — but it only works for
-artifacts quantized deterministically from now on; historical quants carry
-contraction-era bytes no recipe can reproduce. Spec, portability rules
-(the imatrix must be passed as a bare cwd-relative filename), and limitations:
+Statistical fingerprinting (e.g. Cisco's Model Provenance Kit) tells you a
+quant *probably* derives from a base model, and works on any existing file.
+An attestation shows the derivation byte for byte, but only for artifacts
+quantized deterministically from now on — old quants carry contraction-era
+bytes that no recipe reproduces. Spec, the imatrix portability rule (it must
+be passed as a bare cwd-relative filename), and limitations:
 [docs/derivation-attestation.md](docs/derivation-attestation.md).
 
 ## How it works
@@ -125,7 +126,7 @@ If quantization were perfectly reproducible, most files would pack EXACT and the
 The root cause is floating-point contraction (FMA) in the k-quant scale-search loops, and a one-flag build change (`-ffp-contract=off` on the quant kernels' compilation unit) makes quantization bit-reproducible across OS, arch, and compiler. That is what the deltas are absorbing today: the gap between the machine that built the published file and the machine you are regenerating on.
 
 - Upstream fix proposal: [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353).
-- Cross-platform evidence, re-runnable on public CI: [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism). The CI matrix tests the fix two ways: strict builds of tag `b3821` (all five quant legs — including IQ4_XS and an imatrix leg — bit-identical across x86_64/gcc and arm64/clang), and **the #25353 patch itself applied to pinned llama.cpp master with default flags otherwise** — also bit-identical cross-arch, with no measurable slowdown (single-threaded quantize timings came out slightly *faster* on the patched build on both runners; treat as noise). A default MSVC build at the same commit emits exactly the patched hashes — MSVC never contracts at `/fp:precise` — so with the patch, gcc/Linux, clang/macOS, and MSVC/Windows all produce one hash set per quant.
+- Cross-platform evidence, re-runnable on public CI: [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism). The CI matrix tests the fix two ways: strict builds of tag `b3821` (all five quant legs — including IQ4_XS and an imatrix leg — bit-identical across x86_64/gcc and arm64/clang), and **the #25353 patch itself applied to pinned llama.cpp master with default flags otherwise** — also bit-identical cross-arch, with no measurable slowdown (single-threaded quantize timings came out slightly *faster* on the patched build on both runners; treat as noise). A default MSVC build at the same commit emits exactly the patched hashes (current MSVC does not contract at its default `/fp:precise`), so in that CI matrix gcc/Linux, clang/macOS, and MSVC/Windows all produce one hash set per quant.
 
 Switching to the deterministic build is also quality-free, measured: Q4_K_M from the default and `-ffp-contract=off` builds score within 0.0007 PPL on wikitext-2 — ~650x below quantization's own ~0.46 PPL cost and below the error estimate ([data](https://github.com/theadamdanielsson/gguf-quant-determinism#quality-effect-none-measurable)).
 
