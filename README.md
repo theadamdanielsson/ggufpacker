@@ -26,7 +26,7 @@ Pack a directory of GGUF quantizations into a compact store, and reconstruct eve
 | Q6_K_L | 1.0 GB | near | 2.5 MB | Q6_K + override |
 | Q8_0 | 1.2 GB | EXACT | 1.8 MB | |
 
-<!-- demo gif coming: ![demo](docs/demo.gif) -->
+![demo](docs/demo.gif)
 
 ## Why this works
 
