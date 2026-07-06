@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from ggufpack.layout import GGUFParseError, parse_layout, read_header_bytes
+from ggufpacker.layout import GGUFParseError, parse_layout, read_header_bytes
 from tests.util_tinymodel import mutate_kv_string
 
 

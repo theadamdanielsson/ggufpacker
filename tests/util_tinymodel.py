@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from gguf import GGUFWriter
 
-from ggufpack.layout import parse_layout
+from ggufpacker.layout import parse_layout
 
 
 def write_tiny_llama_f16(

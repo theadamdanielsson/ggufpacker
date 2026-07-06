@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from ggufpack.cli import main as cli_main
-from ggufpack.manifest import Manifest
-from ggufpack.packer import pack
-from ggufpack.unpacker import ReconstructError, Unpacker, stats_table
+from ggufpacker.cli import main as cli_main
+from ggufpacker.manifest import Manifest
+from ggufpacker.packer import pack
+from ggufpacker.unpacker import ReconstructError, Unpacker, stats_table
 from tests.conftest import needs_quantize
 from tests.util_tinymodel import flip_payload_bytes, mutate_kv_string, write_tiny_imatrix
 

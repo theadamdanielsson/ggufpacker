@@ -1,4 +1,4 @@
-"""ggufpack command-line interface.
+"""ggufpacker command-line interface.
 
 Exit codes: 0 success, 1 usage/environment error, 2 verification refusal
 (a reconstruction did not hash to the manifest value and was not emitted).
@@ -14,11 +14,11 @@ from . import __version__
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="ggufpack",
+        prog="ggufpacker",
         description="Pack a directory of GGUF quantizations into a compact store; "
         "reconstruct every file bit-exact.",
     )
-    ap.add_argument("--version", action="version", version=f"ggufpack {__version__}")
+    ap.add_argument("--version", action="version", version=f"ggufpacker {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("pack", help="pack a directory of GGUF files")

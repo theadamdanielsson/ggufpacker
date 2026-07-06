@@ -1,10 +1,10 @@
-# ggufpack v0 status
+# ggufpacker v0 status
 
 Updated: 2026-07-06
 
 ## Done
 
-- `pack` / `unpack` / `stats` / `verify` CLI (`ggufpack` entry point), exit
+- `pack` / `unpack` / `stats` / `verify` CLI (`ggufpacker` entry point), exit
   code 2 on any verification refusal.
 - Byte-level GGUF layout parser (v2/v3): header end, `general.alignment`
   handling (default 32), tensor-info table, data-region offsets. Own parser

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from ggufpack.layout import parse_layout
-from ggufpack.recipe import (
+from ggufpacker.layout import parse_layout
+from ggufpacker.recipe import (
     detect_overrides,
     dominant_type,
     guess_recipe,

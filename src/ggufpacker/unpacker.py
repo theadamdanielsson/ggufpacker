@@ -1,4 +1,4 @@
-"""`ggufpack unpack` / `verify` / `stats`: execute plans, never emit bad bytes.
+"""`ggufpacker unpack` / `verify` / `stats`: execute plans, never emit bad bytes.
 
 Reconstruction contract (the exact inverse of packer._finalize_plan):
 
@@ -64,7 +64,7 @@ class Unpacker:
 
     def _tmpdir(self) -> Path:
         if self._tmp is None:
-            self._tmp = tempfile.TemporaryDirectory(prefix="ggufpack-unpack-")
+            self._tmp = tempfile.TemporaryDirectory(prefix="ggufpacker-unpack-")
         return Path(self._tmp.name)
 
     # -- plan execution ----------------------------------------------------

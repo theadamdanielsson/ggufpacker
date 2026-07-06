@@ -1,4 +1,4 @@
-"""`ggufpack pack`: turn a directory of GGUF quantizations into a pack.
+"""`ggufpacker pack`: turn a directory of GGUF quantizations into a pack.
 
 Per-file plan selection (never lossy; blob fallback is mandatory + automatic):
 
@@ -131,7 +131,7 @@ def pack(
         log(f"imatrix: {imatrix_path.name} -> zstd blob")
         manifest.files.append(_store_whole(store, imatrix_path, ROLE_IMATRIX, DELTA_ZSTD_LEVEL))
 
-    with tempfile.TemporaryDirectory(prefix="ggufpack-regen-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="ggufpacker-regen-") as tmp:
         for cand in cands:
             if cand is source:
                 continue

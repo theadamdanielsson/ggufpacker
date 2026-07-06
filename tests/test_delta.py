@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from ggufpack.delta import apply_delta, read_region, rechunk, xor_regions
+from ggufpacker.delta import apply_delta, read_region, rechunk, xor_regions
 
 
 def test_rechunk_reslices_exactly():

@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-FORMAT = "ggufpack/0"
+FORMAT = "ggufpacker/0"
 MANIFEST_NAME = "manifest.json"
 
 # Plans (never lossy — blob fallback is mandatory for anything unmatchable):
@@ -96,7 +96,7 @@ class Manifest:
     def load(cls, pack_dir: str | Path) -> Manifest:
         p = Path(pack_dir) / MANIFEST_NAME
         if not p.is_file():
-            raise FileNotFoundError(f"not a ggufpack: {p} missing")
+            raise FileNotFoundError(f"not a ggufpacker: {p} missing")
         data = json.loads(p.read_text())
         if data.get("format") != FORMAT:
             raise ValueError(f"unsupported pack format {data.get('format')!r}")
