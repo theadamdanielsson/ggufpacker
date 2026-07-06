@@ -114,6 +114,9 @@ No. Every emitted file is sha256-verified against the original, and ggufpacker r
 **Why not just zstd the directory?**
 Because byte compressors get about 1.15x on quantized weights — they are already high-entropy. ggufpacker gets 8.7x because it does not compress the weights, it regenerates them from the source.
 
+**Can I run inference directly from a pack?**
+No. A pack is cold storage — unpack the quant you want (one command, sha256-verified) and point llama.cpp at the result, which is bit-identical to the original file. Practical pattern: keep your daily-driver quant unpacked, pack the ladder you rarely touch. A cache-on-demand runner (`ggufpacker exec`) is on the roadmap.
+
 **What about LoRA adapters or finetunes?**
 Different problem. Those are not deterministic re-quantizations of an F16 in the same directory, so they are out of scope for v0.
 
