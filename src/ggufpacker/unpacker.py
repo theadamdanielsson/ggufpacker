@@ -36,8 +36,9 @@ def _log(msg: str) -> None:
 
 
 class Unpacker:
-    """Reconstructs files from a pack; caches the extracted source + imatrix
-    so `verify` does not re-extract them for every quant."""
+    """Reconstructs files from a pack; caches extracted sources + imatrices
+    (one of each per model in a multi-model pack) so `verify` does not
+    re-extract them for every quant."""
 
     def __init__(self, pack_dir: str | Path, llama_quantize: str | None = None, log=_log):
         self.pack_dir = Path(pack_dir)
@@ -46,8 +47,7 @@ class Unpacker:
         self.llama_quantize = llama_quantize
         self.log = log
         self._tmp: tempfile.TemporaryDirectory | None = None
-        self._source_path: Path | None = None
-        self._imatrix_path: Path | None = None
+        self._materialized: dict[str, Path] = {}  # filename -> extracted path
         self._quantizer: Quantizer | None = None
 
     # -- context management ------------------------------------------------
@@ -98,8 +98,22 @@ class Unpacker:
     def _regen(self, entry: FileEntry) -> Path:
         if not entry.recipe:
             raise ReconstructError(f"{entry.filename}: plan {entry.plan} but no recipe recorded")
-        src = self._materialize_source()
-        imx = self._materialize_imatrix() if entry.recipe.get("use_imatrix") else None
+        src_entry = self.manifest.source_for(entry)
+        if src_entry is None:
+            raise ReconstructError(
+                f"{entry.filename}: pack has no source model entry"
+                + (f" named {entry.source!r}" if entry.source else "")
+            )
+        src = self._materialize(src_entry)
+        imx = None
+        if entry.recipe.get("use_imatrix"):
+            imx_entry = self.manifest.imatrix_for(entry)
+            if imx_entry is None:
+                raise ReconstructError(
+                    f"{entry.filename}: recipe needs an imatrix but pack has none"
+                    + (f" named {entry.imatrix!r}" if entry.imatrix else "")
+                )
+            imx = self._materialize(imx_entry)
         q = self._get_quantizer()
         out = self._tmpdir() / f"regen-{entry.filename}"
         res = q.run(
@@ -132,29 +146,18 @@ class Unpacker:
                 )
         return self._quantizer
 
-    def _materialize_source(self) -> Path:
-        if self._source_path is None:
-            entry = self.manifest.source
-            if entry is None:
-                raise ReconstructError("pack has no source model entry")
+    def _materialize(self, entry: FileEntry) -> Path:
+        """Extract a source/imatrix blob into the scratch dir once, verified."""
+        p = self._materialized.get(entry.filename)
+        if p is None:
             p = self._tmpdir() / entry.filename
             self.store.extract_to(entry.blob, p)
             if sha256_file(p) != entry.sha256:
-                raise ReconstructError(f"source {entry.filename} failed sha256 after extraction")
-            self._source_path = p
-        return self._source_path
-
-    def _materialize_imatrix(self) -> Path:
-        if self._imatrix_path is None:
-            entry = self.manifest.imatrix
-            if entry is None:
-                raise ReconstructError("recipe needs an imatrix but pack has none")
-            p = self._tmpdir() / entry.filename
-            self.store.extract_to(entry.blob, p)
-            if sha256_file(p) != entry.sha256:
-                raise ReconstructError(f"imatrix {entry.filename} failed sha256 after extraction")
-            self._imatrix_path = p
-        return self._imatrix_path
+                raise ReconstructError(
+                    f"{entry.role} {entry.filename} failed sha256 after extraction"
+                )
+            self._materialized[entry.filename] = p
+        return p
 
     # -- verify ------------------------------------------------------------
     def verify_all(self) -> list[tuple[str, str]]:
@@ -215,34 +218,80 @@ def human(n: float) -> str:
 
 
 def stats_table(pack_dir: str | Path) -> str:
-    """The money shot: per-file plan + stored cost, totals, ratio."""
+    """The money shot: per-file plan + stored cost, totals, ratio.
+
+    Multi-model packs (more than one source entry) group files by model, with
+    a per-model subtotal line; single-model packs keep the flat table."""
     pack_dir = Path(pack_dir)
     m = Manifest.load(pack_dir)
     store = BlobStore(pack_dir)
 
-    rows: list[tuple[str, str, str, str, str]] = []
-    total_orig = 0
     seen_blobs: set[str] = set()
-    for e in m.files:
+
+    def _stored(e) -> int:
         stored = 0
         for bid in e.stored_blob_ids():
             if bid not in seen_blobs:  # content-addressing can dedup
                 seen_blobs.add(bid)
                 stored += store.stored_size(bid)
-        total_orig += e.size
+        return stored
+
+    def _row(e, stored: int) -> tuple[str, str, str, str, str]:
         plan = e.plan if e.role == "quant" else f"{e.plan} ({e.role})"
         detail = ""
         if e.recipe:
             detail = e.recipe["qtype"]
             if e.recipe.get("token_embedding_type") or e.recipe.get("output_tensor_type"):
                 detail += "+ovr"
-        rows.append((e.filename, human(e.size), plan, human(stored) if stored else "—", detail))
+        return (e.filename, human(e.size), plan, human(stored) if stored else "—", detail)
+
+    # (group label or None, files) — one group per source when multi-model
+    sources = m.sources
+    sections: list[tuple[str | None, list]] = []
+    if len(sources) > 1:
+        from .recipe import model_stem
+
+        claimed: set[str] = set()
+        for src in sources:
+            group = [src]
+            group += [f for f in m.files if f.role == "imatrix"
+                      and any(q.role == "quant" and q.source == src.filename
+                              and q.imatrix == f.filename for q in m.files)
+                      and f.filename not in claimed]
+            group += [f for f in m.files if f.role == "quant" and f.source == src.filename]
+            claimed.update(f.filename for f in group)
+            sections.append((model_stem(src.filename), group))
+        rest = [f for f in m.files if f.filename not in claimed]
+        if rest:
+            sections.append(("unmatched", rest))
+    else:
+        sections.append((None, list(m.files)))
+
+    rows: list[tuple[str, str, str, str, str] | str] = []  # str = label/subtotal line
+    total_orig = 0
+    for label, group in sections:
+        if label is not None:
+            rows.append(f"[{label}]")
+        g_orig = g_stored = 0
+        for e in group:
+            stored = _stored(e)
+            g_orig += e.size
+            g_stored += stored
+            rows.append(_row(e, stored))
+        total_orig += g_orig
+        if label is not None:
+            g_ratio = g_orig / g_stored if g_stored else 0.0
+            rows.append(
+                f"  subtotal: {len(group)} file(s), {human(g_orig)} -> "
+                f"{human(g_stored)}, {g_ratio:.1f}x"
+            )
 
     manifest_size = (pack_dir / "manifest.json").stat().st_size
     total_stored = manifest_size + sum(store.stored_size(b) for b in seen_blobs)
 
     headers = ("FILE", "ORIGINAL", "PLAN", "STORED", "RECIPE")
-    widths = [max(len(headers[i]), *(len(r[i]) for r in rows)) for i in range(5)]
+    table_rows = [r for r in rows if isinstance(r, tuple)]
+    widths = [max(len(headers[i]), *(len(r[i]) for r in table_rows)) for i in range(5)]
     lines = []
     fmt = "  ".join(
         f"{{:{'<' if i in (0, 2, 4) else '>'}{widths[i]}}}" for i in range(5)
@@ -250,7 +299,7 @@ def stats_table(pack_dir: str | Path) -> str:
     lines.append(fmt.format(*headers))
     lines.append(fmt.format(*("-" * w for w in widths)))
     for r in rows:
-        lines.append(fmt.format(*r))
+        lines.append(fmt.format(*r) if isinstance(r, tuple) else r)
     lines.append("")
     ratio = total_orig / total_stored if total_stored else 0.0
     lines.append(

@@ -13,12 +13,22 @@ Per-file plan selection (never lossy; blob fallback is mandatory + automatic):
 Every non-blob plan is *proven at pack time*: the plan is executed against the
 regenerated file and the reconstruction's sha256 must equal the original's
 before it is recorded. What goes in the manifest has already round-tripped once.
+
+Multi-model directories (v0.3): files are grouped by *tensor identity* — the
+set of tensor names + shapes from the GGUF header (types differ between a
+quant and its source; names/shapes do not). Each quant is matched to the
+F32/F16/BF16 source whose tensor identity it shares. When several sources
+share one identity (e.g. base vs abliterated finetune: identical tensor maps),
+the match is only taken on filename-prefix affinity (exact model stem, then
+longest common prefix); anything still ambiguous is stored as a blob with a
+log line — never guessed. imatrix files associate to models the same way.
 """
 
 from __future__ import annotations
 
+import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,6 +52,7 @@ from .recipe import (
     Recipe,
     detect_overrides,
     guess_recipe,
+    model_stem,
     override_cli_name,
     tensor_type_map,
 )
@@ -75,6 +86,19 @@ def _log(msg: str) -> None:
     print(f"[pack] {msg}", flush=True)
 
 
+@dataclass
+class _ModelGroup:
+    """One model in the input directory: its chosen source + matched quants."""
+
+    source: _Candidate
+    quants: list[_Candidate] = field(default_factory=list)
+    imatrix: Path | None = None
+
+    @property
+    def stem(self) -> str:
+        return model_stem(self.source.path.name)
+
+
 def pack(
     input_dir: str | Path,
     out_pack: str | Path,
@@ -90,7 +114,7 @@ def pack(
     out_pack.mkdir(parents=True, exist_ok=True)
     store = BlobStore(out_pack)
 
-    ggufs, imatrix_path, skipped = _scan(input_dir)
+    ggufs, imatrices, skipped = _scan(input_dir)
     if not ggufs:
         raise PackError(f"no .gguf files found in {input_dir}")
     for s in skipped:
@@ -100,12 +124,13 @@ def pack(
         _Candidate(p, *_try_parse(p))
         for p in ggufs
     ]
-    source = _pick_source(cands)
-    if source is None:
+    groups, unmatched = _group_models(cands, log)
+    if not groups:
         log("WARNING: no F32/F16/BF16 source GGUF found; every quant becomes a blob")
+    _associate_imatrices(groups, imatrices, log)
 
     quantizer: Quantizer | None = None
-    if source is not None and any(c is not source for c in cands):
+    if any(g.quants for g in groups):
         try:
             quantizer = Quantizer.locate(llama_quantize)
             log(f"llama-quantize: {quantizer.binary} "
@@ -124,21 +149,40 @@ def pack(
         ),
     )
 
-    if source is not None:
-        log(f"source: {source.path.name} ({source.path.stat().st_size:,} B) -> zstd blob")
-        manifest.files.append(_store_whole(store, source.path, ROLE_SOURCE, SOURCE_ZSTD_LEVEL))
-    if imatrix_path is not None:
-        log(f"imatrix: {imatrix_path.name} -> zstd blob")
-        manifest.files.append(_store_whole(store, imatrix_path, ROLE_IMATRIX, DELTA_ZSTD_LEVEL))
-
+    stored_imatrices: dict[Path, FileEntry] = {}
     with tempfile.TemporaryDirectory(prefix="ggufpacker-regen-") as tmp:
-        for cand in cands:
-            if cand is source:
-                continue
-            entry = _plan_quant(
-                cand, source, imatrix_path, quantizer, store, Path(tmp), log
+        for group in groups:
+            source = group.source
+            log(f"source: {source.path.name} ({source.path.stat().st_size:,} B) -> zstd blob")
+            manifest.files.append(
+                _store_whole(store, source.path, ROLE_SOURCE, SOURCE_ZSTD_LEVEL)
             )
-            manifest.files.append(entry)
+            if group.imatrix is not None and group.imatrix not in stored_imatrices:
+                log(f"imatrix: {group.imatrix.name} -> zstd blob")
+                entry = _store_whole(store, group.imatrix, ROLE_IMATRIX, DELTA_ZSTD_LEVEL)
+                stored_imatrices[group.imatrix] = entry
+                manifest.files.append(entry)
+            for cand in group.quants:
+                entry = _plan_quant(
+                    cand, source, group.imatrix, quantizer, store, Path(tmp), log
+                )
+                entry.source = source.path.name
+                if entry.recipe and entry.recipe.get("use_imatrix") and group.imatrix:
+                    entry.imatrix = group.imatrix.name
+                manifest.files.append(entry)
+
+        for cand, note in unmatched:
+            if note:
+                manifest.files.append(_blob_fallback(store, cand, note, log))
+            else:  # unparseable: let _plan_quant produce the parse-error note
+                manifest.files.append(
+                    _plan_quant(cand, None, None, quantizer, store, Path(tmp), log)
+                )
+
+    for p in imatrices:
+        if p not in stored_imatrices:
+            log(f"imatrix: {p.name} (not associated with any model) -> zstd blob")
+            manifest.files.append(_store_whole(store, p, ROLE_IMATRIX, DELTA_ZSTD_LEVEL))
 
     manifest.save(out_pack)
     n_by_plan: dict[str, int] = {}
@@ -149,7 +193,7 @@ def pack(
     return manifest
 
 
-def _scan(input_dir: Path) -> tuple[list[Path], Path | None, list[Path]]:
+def _scan(input_dir: Path) -> tuple[list[Path], list[Path], list[Path]]:
     ggufs: list[Path] = []
     imatrices: list[Path] = []
     skipped: list[Path] = []
@@ -162,12 +206,7 @@ def _scan(input_dir: Path) -> tuple[list[Path], Path | None, list[Path]]:
             imatrices.append(p)
         else:
             skipped.append(p)
-    imatrix = imatrices[0] if imatrices else None
-    if len(imatrices) > 1:
-        # v0: single imatrix per pack; extras are still preserved as-is via skip
-        # (they are not gguf files, so they are simply not packed).
-        skipped.extend(imatrices[1:])
-    return ggufs, imatrix, skipped
+    return ggufs, imatrices, skipped
 
 
 def _try_parse(path: Path) -> tuple[GGUFLayout | None, str]:
@@ -177,19 +216,126 @@ def _try_parse(path: Path) -> tuple[GGUFLayout | None, str]:
         return None, str(e)
 
 
-def _pick_source(cands: list[_Candidate]) -> _Candidate | None:
-    """Highest-precision GGUF = dominant >=2D tensor type in {F32, F16, BF16};
-    ties broken by file size (a bigger file carries more precision)."""
+def _identity(layout: GGUFLayout) -> frozenset:
+    """Tensor identity: the set of tensor names + shapes. A quant and its
+    source share it (ggml types differ; names and dims do not)."""
+    return frozenset((t.name, t.dims) for t in layout.tensors)
+
+
+def _is_source_type(cand: _Candidate) -> bool:
     from .recipe import dominant_type
 
-    best: _Candidate | None = None
+    return cand.layout is not None and dominant_type(cand.layout) in _SOURCE_TYPES
+
+
+def _group_models(
+    cands: list[_Candidate], log
+) -> tuple[list[_ModelGroup], list[tuple[_Candidate, str]]]:
+    """Group files by model: pick one source per (tensor identity, model stem)
+    — highest precision = largest file — then attach each quant to the source
+    whose tensor identity it shares. Ambiguity between identical-identity
+    sources (finetune twins) resolves ONLY on filename-prefix affinity;
+    otherwise the quant is returned in `unmatched` for blob fallback.
+
+    Returns (groups, unmatched) where unmatched pairs a candidate with a blob
+    note ("" = unparseable; the parse error is reported downstream)."""
+    chosen: dict[tuple[frozenset, str], _Candidate] = {}
     for c in cands:
-        if c.layout is None:
+        if not _is_source_type(c):
             continue
-        if dominant_type(c.layout) in _SOURCE_TYPES:
-            if best is None or c.path.stat().st_size > best.path.stat().st_size:
-                best = c
-    return best
+        key = (_identity(c.layout), model_stem(c.path.name))
+        prev = chosen.get(key)
+        if prev is None or c.path.stat().st_size > prev.path.stat().st_size:
+            chosen[key] = c
+
+    groups = [_ModelGroup(source=c) for c in chosen.values()]
+    by_identity: dict[frozenset, list[_ModelGroup]] = {}
+    for g in groups:
+        by_identity.setdefault(_identity(g.source.layout), []).append(g)
+
+    picked_sources = {id(c) for c in chosen.values()}
+    unmatched: list[tuple[_Candidate, str]] = []
+    for c in cands:
+        if id(c) in picked_sources:
+            continue
+        if c.layout is None:
+            unmatched.append((c, ""))
+            continue
+        matches = by_identity.get(_identity(c.layout), [])
+        if not matches:
+            unmatched.append(
+                (c, "no F32/F16/BF16 source shares this file's tensor names/shapes")
+            )
+        elif len(matches) == 1:
+            matches[0].quants.append(c)
+        else:
+            best = _prefix_affinity(model_stem(c.path.name), matches)
+            if best is not None:
+                log(f"{c.path.name}: {len(matches)} sources share its tensor map; "
+                    f"matched to {best.source.path.name} by filename prefix")
+                best.quants.append(c)
+            else:
+                names = ", ".join(sorted(g.source.path.name for g in matches))
+                unmatched.append((
+                    c,
+                    f"ambiguous source: {len(matches)} sources share this tensor map "
+                    f"({names}) and the filename gives no unique prefix affinity; "
+                    f"storing whole file rather than guessing",
+                ))
+    return groups, unmatched
+
+
+def _prefix_affinity(stem: str, groups: list[_ModelGroup]) -> _ModelGroup | None:
+    """The group whose source stem the given stem UNIQUELY prefers: exact stem
+    equality first, then longest common prefix. None when tied or unrelated —
+    the caller must fall back to a blob, never guess."""
+    def score(g: _ModelGroup) -> tuple[int, int]:
+        lcp = len(os.path.commonprefix([stem, g.stem]))
+        return (1 if stem == g.stem else 0, lcp)
+
+    scored = sorted(groups, key=score, reverse=True)
+    best_score = score(scored[0])
+    if best_score[1] == 0:  # no shared prefix at all: no affinity
+        return None
+    if len(scored) > 1 and score(scored[1]) == best_score:  # tie: refuse to guess
+        return None
+    return scored[0]
+
+
+def _associate_imatrices(groups: list[_ModelGroup], imatrices: list[Path], log) -> None:
+    """Attach each model's imatrix by filename-prefix affinity. A single
+    imatrix next to a single model applies unconditionally (pre-0.3 behavior,
+    covers `imatrix.dat`-style names); with several models an imatrix applies
+    only to the model whose files share its prefix — one stem must be a full
+    prefix of the other (a merely partial overlap like tinyA/tinyB is not
+    affinity). A model without a matched imatrix packs its quants without
+    one, as before."""
+    if not imatrices:
+        return
+    if len(groups) == 1 and len(imatrices) == 1:
+        groups[0].imatrix = imatrices[0]
+        return
+    for g in groups:
+        def score(p: Path, _stem: str = g.stem) -> tuple[int, int]:
+            istem = model_stem(p.name)
+            lcp = len(os.path.commonprefix([istem, _stem]))
+            return (1 if istem == _stem else 0, lcp)
+
+        candidates = [p for p in imatrices if _stem_contains(model_stem(p.name), g.stem)]
+        if not candidates:
+            continue
+        ranked = sorted(candidates, key=score, reverse=True)
+        best = score(ranked[0])
+        if len(ranked) > 1 and score(ranked[1]) == best:
+            log(f"{g.source.path.name}: several imatrix files match equally; "
+                f"packing this model's quants without an imatrix")
+            continue
+        g.imatrix = ranked[0]
+
+
+def _stem_contains(a: str, b: str) -> bool:
+    """True when one non-empty stem is a full prefix of the other."""
+    return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a))
 
 
 def _store_whole(store: BlobStore, path: Path, role: str, level: int) -> FileEntry:
@@ -332,7 +478,18 @@ def _finalize_plan(
     )
 
     if sha256_file(regen) == pub_sha:
-        log(f"{name}: EXACT (recipe only)")
+        if recipe.use_imatrix:
+            # The header embeds `quantize.imatrix.file` — a machine-local path
+            # that will differ (in LENGTH, shifting every offset) when the
+            # imatrix is materialized elsewhere at unpack time. Pin the
+            # original header so the plan reproduces anywhere.
+            entry.header_blob = store.put_bytes(
+                read_header_bytes(cand.layout), DELTA_ZSTD_LEVEL  # type: ignore[arg-type]
+            )
+            _prove(entry, regen, store)
+            log(f"{name}: EXACT (recipe only; header pinned, imatrix path is local)")
+        else:
+            log(f"{name}: EXACT (recipe only)")
         return entry
 
     pub_layout = cand.layout
@@ -343,7 +500,8 @@ def _finalize_plan(
 
     pub_header = read_header_bytes(pub_layout)
     reg_header = read_header_bytes(reg_layout)
-    if pub_header != reg_header:
+    if pub_header != reg_header or recipe.use_imatrix:
+        # (also pinned whenever the recipe uses an imatrix — see above)
         entry.header_blob = store.put_bytes(pub_header, DELTA_ZSTD_LEVEL)
 
     size = pub_layout.data_size
@@ -414,3 +572,4 @@ def _prove(entry: FileEntry, regen: Path, store: BlobStore) -> None:
             )
     finally:
         tmp_out.unlink(missing_ok=True)
+

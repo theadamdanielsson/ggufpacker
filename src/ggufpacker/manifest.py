@@ -47,6 +47,11 @@ class FileEntry:
     blob: str | None = None  # zstd'd whole file (plan=blob)
     data_start: int | None = None  # original file's tensor-data offset
     note: str = ""
+    # Multi-model packs (v0.3): which source/imatrix entry this quant
+    # regenerates from. None on quants from pre-0.3 packs (which can only
+    # hold one source/imatrix, so resolution falls back to the first entry).
+    source: str | None = None  # filename of the source entry
+    imatrix: str | None = None  # filename of the imatrix entry
 
     def stored_blob_ids(self) -> list[str]:
         return [b for b in (self.header_blob, self.delta_blob, self.blob) if b]
@@ -73,24 +78,46 @@ class Manifest:
     def imatrix(self) -> FileEntry | None:
         return next((f for f in self.files if f.role == ROLE_IMATRIX), None)
 
-    def find(self, name_or_type: str) -> FileEntry | None:
-        """Resolve a filename or quant type to exactly one entry.
+    @property
+    def sources(self) -> list[FileEntry]:
+        return [f for f in self.files if f.role == ROLE_SOURCE]
 
-        Order: (1) exact filename; (2) quant-suffix match on the ORIGINAL
-        filename — `...-<TYPE>.gguf`, case-insensitive — which is the file's
-        own identity and works for blob-plan files with no recipe; (3) only
-        when no filename carries the suffix, recipe base-type match.
+    def source_for(self, entry: FileEntry) -> FileEntry | None:
+        """The source entry a quant regenerates from: its recorded per-file
+        reference (multi-model packs), else the pack's single/first source."""
+        if entry.source:
+            return next(
+                (f for f in self.files
+                 if f.role == ROLE_SOURCE and f.filename == entry.source),
+                None,
+            )
+        return self.source
+
+    def imatrix_for(self, entry: FileEntry) -> FileEntry | None:
+        """Same resolution rule as source_for, for the imatrix."""
+        if entry.imatrix:
+            return next(
+                (f for f in self.files
+                 if f.role == ROLE_IMATRIX and f.filename == entry.imatrix),
+                None,
+            )
+        return self.imatrix
+
+    def find_all(self, name_or_type: str) -> list[FileEntry]:
+        """All entries a filename-or-type query names, at the FIRST matching
+        resolution step: (1) exact filename; (2) quant-suffix match on the
+        ORIGINAL filename — `...-<TYPE>.gguf`, case-insensitive — which is the
+        file's own identity and works for blob-plan files with no recipe;
+        (3) only when no filename carries the suffix, recipe base-type match.
 
         The suffix step must beat the recipe step: bartowski `_L`/`_XL`
         variants share a recipe base type (Q4_K_L = base Q4_K_M + tensor-type
         override), so matching recipes first made `Q4_K_M` resolve to
-        whichever variant happened to iterate first. Whenever a step matches
-        several entries, AmbiguousNameError is raised instead of picking one;
-        returns None when nothing matches at all.
+        whichever variant happened to iterate first.
         """
         for f in self.files:
             if f.filename == name_or_type:
-                return f
+                return [f]
         want = name_or_type.upper()
 
         suffixed = []
@@ -98,20 +125,26 @@ class Manifest:
             stem = f.filename[:-5] if f.filename.endswith(".gguf") else f.filename
             if stem.upper().endswith("-" + want):
                 suffixed.append(f)
-        if len(suffixed) == 1:
-            return suffixed[0]
         if suffixed:
-            raise AmbiguousNameError(_ambiguous(name_or_type, suffixed))
+            return suffixed
 
-        by_recipe = [
+        return [
             f for f in self.files
             if f.recipe and f.recipe.get("qtype", "").upper() == want
         ]
-        if len(by_recipe) == 1:
-            return by_recipe[0]
-        if by_recipe:
-            raise AmbiguousNameError(_ambiguous(name_or_type, by_recipe))
-        return None
+
+    def find(self, name_or_type: str) -> FileEntry | None:
+        """Resolve a filename or quant type to exactly one entry (see
+        find_all for the resolution order). Whenever a step matches several
+        entries, AmbiguousNameError is raised instead of picking one; returns
+        None when nothing matches at all.
+        """
+        matches = self.find_all(name_or_type)
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        raise AmbiguousNameError(_ambiguous(name_or_type, matches))
 
     def save(self, pack_dir: str | Path) -> None:
         data = {

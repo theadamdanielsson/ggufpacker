@@ -103,6 +103,29 @@ class RecipeGuess:
     notes: list[str] = field(default_factory=list)
 
 
+def model_stem(filename: str) -> str:
+    """Model-identity part of a filename: extension dropped, trailing quant-type
+    suffix (`-Q4_K_M`, `-f16`, custom `_L`/`_XL` variants) stripped.
+
+    "Llama-3.2-1B-Instruct-Q4_K_M.gguf" -> "Llama-3.2-1B-Instruct"
+    "Llama-3.2-1B-Instruct-f16.gguf"    -> "Llama-3.2-1B-Instruct"
+    "Llama-3.2-1B-Instruct.imatrix"     -> "Llama-3.2-1B-Instruct"
+
+    Used for filename-prefix affinity tiebreaks and display grouping only —
+    never for correctness decisions (those rest on tensor identity + the
+    verify-or-refuse machinery).
+    """
+    name = filename.rsplit("/", 1)[-1]
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    m = _SUFFIX_RE.search(name + ".gguf")  # reuse the quant-suffix pattern
+    if m:
+        suffix = m.group(1).upper()
+        if suffix in KNOWN_QTYPES or suffix in CUSTOM_BASE:
+            name = name[: m.start()]
+    return name
+
+
 def type_name(ggml_type: int) -> str:
     try:
         return GGMLQuantizationType(ggml_type).name

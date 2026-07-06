@@ -24,13 +24,14 @@ def write_tiny_llama_f16(
     n_embd: int = 256,
     n_ff: int = 512,
     n_head: int = 4,
+    n_layers: int = 1,
 ) -> Path:
     path = Path(path)
     rng = np.random.default_rng(seed)
     w = GGUFWriter(str(path), "llama")
     w.add_context_length(512)
     w.add_embedding_length(n_embd)
-    w.add_block_count(1)
+    w.add_block_count(n_layers)
     w.add_feed_forward_length(n_ff)
     w.add_head_count(n_head)
     w.add_head_count_kv(n_head)
@@ -49,15 +50,16 @@ def write_tiny_llama_f16(
     w.add_tensor("token_embd.weight", f16(n_vocab, n_embd))
     w.add_tensor("output_norm.weight", f32(n_embd))
     w.add_tensor("output.weight", f16(n_vocab, n_embd))
-    w.add_tensor("blk.0.attn_norm.weight", f32(n_embd))
-    w.add_tensor("blk.0.attn_q.weight", f16(n_embd, n_embd))
-    w.add_tensor("blk.0.attn_k.weight", f16(n_embd, n_embd))
-    w.add_tensor("blk.0.attn_v.weight", f16(n_embd, n_embd))
-    w.add_tensor("blk.0.attn_output.weight", f16(n_embd, n_embd))
-    w.add_tensor("blk.0.ffn_norm.weight", f32(n_embd))
-    w.add_tensor("blk.0.ffn_gate.weight", f16(n_ff, n_embd))
-    w.add_tensor("blk.0.ffn_up.weight", f16(n_ff, n_embd))
-    w.add_tensor("blk.0.ffn_down.weight", f16(n_embd, n_ff))
+    for i in range(n_layers):
+        w.add_tensor(f"blk.{i}.attn_norm.weight", f32(n_embd))
+        w.add_tensor(f"blk.{i}.attn_q.weight", f16(n_embd, n_embd))
+        w.add_tensor(f"blk.{i}.attn_k.weight", f16(n_embd, n_embd))
+        w.add_tensor(f"blk.{i}.attn_v.weight", f16(n_embd, n_embd))
+        w.add_tensor(f"blk.{i}.attn_output.weight", f16(n_embd, n_embd))
+        w.add_tensor(f"blk.{i}.ffn_norm.weight", f32(n_embd))
+        w.add_tensor(f"blk.{i}.ffn_gate.weight", f16(n_ff, n_embd))
+        w.add_tensor(f"blk.{i}.ffn_up.weight", f16(n_ff, n_embd))
+        w.add_tensor(f"blk.{i}.ffn_down.weight", f16(n_embd, n_ff))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -70,6 +72,7 @@ def write_tiny_imatrix(
     n_embd: int = 256,
     n_ff: int = 512,
     seed: int = 11,
+    n_layers: int = 1,
 ) -> Path:
     """Legacy (pre-GGUF) imatrix file matching write_tiny_llama_f16's tensors.
 
@@ -82,16 +85,18 @@ def write_tiny_imatrix(
     import numpy as np
 
     rng = np.random.default_rng(seed)
-    entries: list[tuple[str, int]] = [
-        ("blk.0.attn_q.weight", n_embd),
-        ("blk.0.attn_k.weight", n_embd),
-        ("blk.0.attn_v.weight", n_embd),
-        ("blk.0.attn_output.weight", n_embd),
-        ("blk.0.ffn_gate.weight", n_embd),
-        ("blk.0.ffn_up.weight", n_embd),
-        ("blk.0.ffn_down.weight", n_ff),
-        ("output.weight", n_embd),
-    ]
+    entries: list[tuple[str, int]] = []
+    for i in range(n_layers):
+        entries += [
+            (f"blk.{i}.attn_q.weight", n_embd),
+            (f"blk.{i}.attn_k.weight", n_embd),
+            (f"blk.{i}.attn_v.weight", n_embd),
+            (f"blk.{i}.attn_output.weight", n_embd),
+            (f"blk.{i}.ffn_gate.weight", n_embd),
+            (f"blk.{i}.ffn_up.weight", n_embd),
+            (f"blk.{i}.ffn_down.weight", n_ff),
+        ]
+    entries.append(("output.weight", n_embd))
     dataset = b"synthetic-calibration.txt"
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:

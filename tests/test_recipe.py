@@ -1,10 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from ggufpacker.layout import parse_layout
 from ggufpacker.recipe import (
     detect_overrides,
     dominant_type,
     guess_recipe,
+    model_stem,
     override_cli_name,
 )
 
@@ -53,3 +56,16 @@ def test_detect_overrides():
 def test_override_cli_name():
     assert override_cli_name("Q8_0") == "q8_0"
     assert override_cli_name("IQ4_NL") == "iq4_nl"
+
+
+@pytest.mark.parametrize("filename,stem", [
+    ("Llama-3.2-1B-Instruct-Q4_K_M.gguf", "Llama-3.2-1B-Instruct"),
+    ("Llama-3.2-1B-Instruct-f16.gguf", "Llama-3.2-1B-Instruct"),
+    ("Llama-3.2-1B-Instruct-Q4_K_L.gguf", "Llama-3.2-1B-Instruct"),  # custom variant
+    ("Llama-3.2-1B-Instruct.imatrix", "Llama-3.2-1B-Instruct"),
+    ("imatrix.dat", "imatrix"),
+    ("model-final-v2.gguf", "model-final-v2"),  # unknown suffix: kept
+    ("base-abliterated-Q8_0.gguf", "base-abliterated"),
+])
+def test_model_stem(filename: str, stem: str):
+    assert model_stem(filename) == stem

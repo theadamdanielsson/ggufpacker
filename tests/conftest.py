@@ -57,12 +57,54 @@ def tiny_quants(tmp_path_factory: pytest.TempPathFactory, tiny_f16: Path, qbin: 
     return out
 
 
+@pytest.fixture(scope="session")
+def tiny_b_f16(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A SECOND tiny architecture: different dims and layer count, so its
+    tensor identity (names + shapes) cannot collide with tiny_f16's."""
+    d = tmp_path_factory.mktemp("tinymodelB")
+    return write_tiny_llama_f16(
+        d / "tinyB-f16.gguf", seed=13,
+        n_vocab=256, n_embd=512, n_ff=256, n_head=8, n_layers=2,
+    )
+
+
+@pytest.fixture(scope="session")
+def tiny_b_quants(tmp_path_factory: pytest.TempPathFactory, tiny_b_f16: Path, qbin: str) -> dict:
+    """Quantize the second architecture once per session."""
+    d = tmp_path_factory.mktemp("tinyquantsB")
+    out = {}
+    for qtype in ("Q8_0", "Q4_K_M"):
+        p = d / f"tinyB-{qtype}.gguf"
+        r = subprocess.run([qbin, str(tiny_b_f16), str(p), qtype], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        out[qtype] = p
+    return out
+
+
 @pytest.fixture()
 def model_dir(tmp_path: Path, tiny_f16: Path) -> Path:
     """A fresh 'published repo' directory holding the source F16."""
     d = tmp_path / "repo"
     d.mkdir()
     shutil.copyfile(tiny_f16, d / tiny_f16.name)
+    return d
+
+
+@pytest.fixture()
+def multi_model_dir(
+    tmp_path: Path, tiny_f16: Path, tiny_quants: dict,
+    tiny_b_f16: Path, tiny_b_quants: dict,
+) -> Path:
+    """One directory holding TWO models' ladders: tinyA (1 layer, 256 embd)
+    and tinyB (2 layers, 512 embd), each with its F16 source + two quants."""
+    d = tmp_path / "multirepo"
+    d.mkdir()
+    shutil.copyfile(tiny_f16, d / "tinyA-f16.gguf")
+    for qtype, p in tiny_quants.items():
+        shutil.copyfile(p, d / f"tinyA-{qtype}.gguf")
+    shutil.copyfile(tiny_b_f16, d / "tinyB-f16.gguf")
+    for qtype, p in tiny_b_quants.items():
+        shutil.copyfile(p, d / f"tinyB-{qtype}.gguf")
     return d
 
 
