@@ -66,7 +66,12 @@ class Quantizer:
         imatrix: str | Path | None = None,
         token_embedding_type: str | None = None,
         output_tensor_type: str | None = None,
+        cwd: str | Path | None = None,
     ) -> QuantizeResult:
+        """Invoke llama-quantize. `imatrix` is passed VERBATIM: llama-quantize
+        embeds that exact string in the output header (quantize.imatrix.file),
+        so the string is part of the output bytes. Callers that need portable
+        output pass a bare filename plus `cwd` (the attest path does)."""
         import time
 
         argv: list[str] = [self.binary]
@@ -78,7 +83,8 @@ class Quantizer:
             argv += ["--output-tensor-type", output_tensor_type]
         argv += [str(src_gguf), str(out_gguf), qtype]
         t0 = time.time()
-        p = subprocess.run(argv, capture_output=True, text=True)
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           cwd=str(cwd) if cwd else None)
         return QuantizeResult(
             returncode=p.returncode,
             seconds=time.time() - t0,

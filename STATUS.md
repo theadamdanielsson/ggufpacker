@@ -1,8 +1,26 @@
 # ggufpacker v0 status
 
-Updated: 2026-07-06 (v0.3.1)
+Updated: 2026-07-06 (v0.4.0)
 
 ## Done
+
+- **Derivation attestations (v0.4.0)**: `attest` proves a quant derives
+  bit-exactly from a source (re-derive + sha256 match, refuse otherwise) and
+  emits an in-toto Statement v1 with a custom predicate
+  (`.../attestation/gguf-derivation/v0`); `verify-attestation` re-derives and
+  byte-compares against the attested digest (exit 0 proven / 2 refused).
+  Spec in docs/derivation-attestation.md. Design informed by adversarial
+  research (2026-07-06): no existing spec/tool does bit-exact recipe
+  re-derivation of weights (OMS/sigstore = signing; Cisco Model Provenance
+  Kit = statistical detection; two 2026 arXiv papers call for exactly this
+  and ship nothing); in-toto custom predicate under own namespace confirmed
+  as the correct, non-redundant format vs SLSA (re-derivability vs
+  trust-the-builder). Portability rule discovered en route: llama-quantize
+  embeds the --imatrix argument string verbatim in the output header, so
+  attestable artifacts must be quantized with the bare cwd-relative imatrix
+  filename; attest enforces this and hints the embedded path on refusal.
+  Statements are unsigned by design (DSSE/sigstore wrapping is out of scope
+  for v0). 10 new tests (126 total).
 
 - **Hardening (v0.3.1)**, from an adversarial self-audit before launch:
   - `--prune` now verifies the **restore closure** of every EXACT/NEAR file

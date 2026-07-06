@@ -102,6 +102,52 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--max-size", required=True, metavar="N[G|M]",
                    help="size cap, e.g. 20G, 500M, or plain bytes")
 
+    p = sub.add_parser(
+        "attest",
+        help="prove a quant derives bit-exactly from a source; emit an attestation",
+        description="Re-derive QUANT from SOURCE with llama-quantize, byte-compare, "
+        "and only on a sha256 match write an in-toto Statement (JSON) recording the "
+        "derivation: source digest, recipe, build identity, output digest. Refuses "
+        "(exit 2) if no recipe reproduces the file. The statement is unsigned; wrap "
+        "it in DSSE/sigstore separately if you need signatures.",
+    )
+    p.add_argument("quant", help="the published quant .gguf to attest")
+    p.add_argument("--source", required=True, metavar="F16.gguf",
+                   help="the base model the quant derives from")
+    p.add_argument("--imatrix", metavar="PATH",
+                   help="importance matrix the recipe uses, if any")
+    p.add_argument("--qtype", metavar="TYPE",
+                   help="quant type (default: inferred from filename/tensors)")
+    p.add_argument("--token-embedding-type", metavar="T",
+                   help="with --qtype: --token-embedding-type override")
+    p.add_argument("--output-tensor-type", metavar="T",
+                   help="with --qtype: --output-tensor-type override")
+    p.add_argument("--llama-cpp-ref", metavar="REF",
+                   help="llama.cpp tag/commit of the quantize build, recorded as-is")
+    p.add_argument("--deterministic-build", action="store_true",
+                   help="assert the binary was built with deterministic quantization "
+                   "(-ffp-contract=off on ggml-quants.c; llama.cpp#25353), making the "
+                   "attestation verifiable across machines")
+    p.add_argument("--llama-quantize", metavar="PATH",
+                   help="llama-quantize binary (default: $PATH lookup)")
+    p.add_argument("-o", "--output", metavar="PATH",
+                   help="where to write the statement (default: QUANT.derivation.json)")
+
+    p = sub.add_parser(
+        "verify-attestation",
+        help="re-derive an attested quant and byte-compare against the statement",
+        description="Load an attestation written by `attest`, locate the base model "
+        "and imatrix by their attested names (next to the attestation by default), "
+        "check their digests, re-run the recipe, and compare the output sha256 to "
+        "the attested subject digest. Exit 0 = proven; exit 2 = refused/mismatch.",
+    )
+    p.add_argument("attestation", help="the .derivation.json statement")
+    p.add_argument("--dir", metavar="DIR",
+                   help="directory holding the attested files (default: the "
+                   "attestation's directory)")
+    p.add_argument("--llama-quantize", metavar="PATH",
+                   help="llama-quantize binary (default: $PATH lookup)")
+
     p = sub.add_parser("stats", help="show per-file plans, stored cost and ratio")
     p.add_argument("pack", help="pack directory")
 
@@ -210,6 +256,65 @@ def _dispatch(args: argparse.Namespace) -> int:
                   f"cache now {human(stats.remaining)} (cap {args.max_size})")
             return 0
         raise AssertionError(f"unhandled cache command {args.cache_cmd}")
+
+    if args.cmd == "attest":
+        import json as _json
+
+        from .attest import AttestError, attest
+        from .quantizer import QuantizeError
+
+        try:
+            result = attest(
+                args.quant,
+                source_path=args.source,
+                imatrix_path=args.imatrix,
+                llama_quantize=args.llama_quantize,
+                qtype=args.qtype,
+                token_embedding_type=args.token_embedding_type,
+                output_tensor_type=args.output_tensor_type,
+                llama_cpp_ref=args.llama_cpp_ref,
+                deterministic_build=args.deterministic_build,
+                log=lambda m: print(m, file=sys.stderr),
+            )
+        except (FileNotFoundError, QuantizeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except AttestError as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        out = args.output or f"{args.quant}.derivation.json"
+        with open(out, "w") as f:
+            _json.dump(result.statement, f, indent=1)
+            f.write("\n")
+        r = result.recipe
+        detail = r.qtype + (
+            " +overrides" if r.token_embedding_type or r.output_tensor_type else ""
+        )
+        print(f"proven: {detail} reproduces "
+              f"{result.statement['subject'][0]['name']} bit-exact "
+              f"({result.seconds:.1f}s); attestation written to {out}",
+              file=sys.stderr)
+        return 0
+
+    if args.cmd == "verify-attestation":
+        from .attest import AttestationInvalid, VerifyFailed, verify
+        from .quantizer import QuantizeError
+
+        try:
+            verify(
+                args.attestation,
+                llama_quantize=args.llama_quantize,
+                search_dir=args.dir,
+                log=lambda m: print(m, file=sys.stderr),
+            )
+        except (FileNotFoundError, QuantizeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except (AttestationInvalid, VerifyFailed) as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        print("verified: re-derivation reproduces the attested sha256 bit-exact")
+        return 0
 
     if args.cmd == "stats":
         from .manifest import ManifestError

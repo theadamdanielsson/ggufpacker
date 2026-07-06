@@ -86,6 +86,26 @@ Re-verify the whole store end to end:
 ggufpacker verify llama-1b.ggufpack
 ```
 
+### Derivation attestations
+
+The same prove-or-refuse machinery, pointed outward: `attest` re-derives a
+quant from its source, byte-compares, and only on a sha256 match emits an
+[in-toto Statement](docs/derivation-attestation.md) recording the derivation —
+source digest, imatrix digest, recipe, build identity, output digest. Anyone
+can then re-run the recipe and byte-compare, no trust in the publisher needed:
+
+```
+ggufpacker attest model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
+ggufpacker verify-attestation model-Q4_K_M.gguf.derivation.json
+```
+
+This is "probably derived" (statistical fingerprinting, e.g. Cisco's Model
+Provenance Kit) upgraded to "provably derived" — but it only works for
+artifacts quantized deterministically from now on; historical quants carry
+contraction-era bytes no recipe can reproduce. Spec, portability rules
+(the imatrix must be passed as a bare cwd-relative filename), and limitations:
+[docs/derivation-attestation.md](docs/derivation-attestation.md).
+
 ## How it works
 
 Each file in the directory is stored under one of three plans:
