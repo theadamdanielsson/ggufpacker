@@ -2,29 +2,29 @@
 
 Pack a directory of GGUF quantizations into a compact store, and reconstruct every file bit-exact on demand.
 
-**16.0 GB -> 1.8 GB, 8.7x** on a real published repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files, one `.ggufpack` store, manifest 12.4 KB. Originals deleted, all 17 quants regenerated from the pack, 17/17 sha256 identical to the original Hugging Face files, in 283 seconds.
+**16.0 GiB -> 1.8 GiB, 8.7x** on a real published repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files, one `.ggufpack` store, manifest 12.4 KiB. Exact bytes: 17,157,953,114 -> 1,964,806,736 (8.73x). Originals deleted, all 17 quants regenerated from the pack, 17/17 sha256 identical to the original Hugging Face files, in 283 seconds.
 
 | File | Original | Plan | Stored | Recipe |
 |------|---------:|------|-------:|--------|
-| f16 | 2.3 GB | blob | 1.8 GB | source |
-| imatrix | 1.3 MB | blob | 828.7 KB | |
-| IQ3_M | 626.8 MB | near | 2.5 MB | |
-| IQ4_XS | 708.7 MB | near | 2.1 MB | |
-| Q3_K_L | 698.6 MB | near | 4.0 MB | |
-| Q3_K_XL | 759.3 MB | near | 3.8 MB | Q3_K_L + override |
-| Q4_0 | 737.2 MB | near | 2.5 MB | |
-| Q4_0_4_4 | 735.2 MB | near | 2.5 MB | |
-| Q4_0_4_8 | 735.2 MB | near | 2.5 MB | |
-| Q4_0_8_8 | 735.2 MB | near | 2.5 MB | |
-| Q4_K_L | 830.9 MB | near | 4.4 MB | Q4_K_M + override |
-| Q4_K_M | 770.3 MB | near | 4.5 MB | |
-| Q4_K_S | 739.7 MB | near | 5.1 MB | |
-| Q5_K_L | 929.9 MB | near | 5.7 MB | Q5_K_M + override |
-| Q5_K_M | 869.3 MB | near | 5.9 MB | |
-| Q5_K_S | 851.2 MB | near | 6.6 MB | |
-| Q6_K | 974.5 MB | near | 2.6 MB | |
-| Q6_K_L | 1.0 GB | near | 2.5 MB | Q6_K + override |
-| Q8_0 | 1.2 GB | EXACT | 1.8 MB | |
+| f16 | 2.3 GiB | blob | 1.8 GiB | source |
+| imatrix | 1.3 MiB | blob | 828.7 KiB | |
+| IQ3_M | 626.8 MiB | near | 2.5 MiB | |
+| IQ4_XS | 708.7 MiB | near | 2.1 MiB | |
+| Q3_K_L | 698.6 MiB | near | 4.0 MiB | |
+| Q3_K_XL | 759.3 MiB | near | 3.8 MiB | Q3_K_L + override |
+| Q4_0 | 737.2 MiB | near | 2.5 MiB | |
+| Q4_0_4_4 | 735.2 MiB | near | 2.5 MiB | |
+| Q4_0_4_8 | 735.2 MiB | near | 2.5 MiB | |
+| Q4_0_8_8 | 735.2 MiB | near | 2.5 MiB | |
+| Q4_K_L | 830.9 MiB | near | 4.4 MiB | Q4_K_M + override |
+| Q4_K_M | 770.3 MiB | near | 4.5 MiB | |
+| Q4_K_S | 739.7 MiB | near | 5.1 MiB | |
+| Q5_K_L | 929.9 MiB | near | 5.7 MiB | Q5_K_M + override |
+| Q5_K_M | 869.3 MiB | near | 5.9 MiB | |
+| Q5_K_S | 851.2 MiB | near | 6.6 MiB | |
+| Q6_K | 974.5 MiB | near | 2.6 MiB | |
+| Q6_K_L | 1.0 GiB | near | 2.5 MiB | Q6_K + override |
+| Q8_0 | 1.2 GiB | EXACT | 1.8 MiB | |
 
 ![demo](https://raw.githubusercontent.com/theadamdanielsson/ggufpacker/main/docs/demo.gif)
 
@@ -90,7 +90,7 @@ ggufpacker verify llama-1b.ggufpack
 
 Each file in the directory is stored under one of three plans:
 
-- **EXACT** — recipe only. The quant reproduces byte-for-byte from the source and recipe alone, no delta needed. In the demo, `Q8_0` packed to 1.8 MB with an EXACT plan.
+- **EXACT** — recipe only. The quant reproduces byte-for-byte from the source and recipe alone, no delta needed. In the demo, `Q8_0` packed to 1.8 MiB with an EXACT plan.
 - **NEAR** — recipe plus a zstd correction delta. The regenerated file is almost identical to the original; the delta patches the remaining bytes. Most k-quants land here, with deltas in the low single-digit MB.
 - **blob** — the whole file, zstd-compressed. This is the automatic fallback for anything that cannot be expressed as a recipe (the F16 source itself, and files ggufpacker does not know how to regenerate). It is never lossy.
 
@@ -105,7 +105,7 @@ If quantization were perfectly reproducible, most files would pack EXACT and the
 The root cause is floating-point contraction (FMA) in the k-quant scale-search loops, and a one-flag build change (`-ffp-contract=off` on the quant kernels' compilation unit) makes quantization bit-reproducible across OS, arch, and compiler. That is what the deltas are absorbing today: the gap between the machine that built the published file and the machine you are regenerating on.
 
 - Upstream fix proposal: [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353).
-- Cross-platform evidence (re-runnable on public CI): [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism).
+- Cross-platform evidence, re-runnable on public CI: [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism). The CI matrix tests the fix two ways: strict builds of tag `b3821` (all five quant legs — including IQ4_XS and an imatrix leg — bit-identical across x86_64/gcc and arm64/clang), and **the #25353 patch itself applied to pinned llama.cpp master with default flags otherwise** — also bit-identical cross-arch, with no measurable slowdown (single-threaded quantize timings came out slightly *faster* on the patched build on both runners; treat as noise).
 
 Switching to the deterministic build is also quality-free, measured: Q4_K_M from the default and `-ffp-contract=off` builds score within 0.0007 PPL on wikitext-2 — ~650x below quantization's own ~0.46 PPL cost and below the error estimate ([data](https://github.com/theadamdanielsson/gguf-quant-determinism#quality-effect-none-measurable)).
 
@@ -125,10 +125,10 @@ Stated up front, because they change what ggufpacker is good for today:
 
 40/40 files across two model families reconstruct bit-exact:
 
-- **Llama-3.2-1B** (17 files, build `b3821`): a 14.68 GB ladder; correction deltas total 31.9 MB, i.e. **+1.3% of the F16 size for the entire ladder**.
-- **Qwen2.5-1.5B** (23 files, build `b3772`): 22.18 GB -> 3.156 GB, **7.03x**.
+- **Llama-3.2-1B** (17 quants, build `b3821`): 14.68 GB (SI) of quants. The correction deltas total 32.1 MB — **+1.3% of the F16 size for the entire ladder**. The pack stores 64.3 MB for those 17 files in total, because each NEAR file also carries its zstd'd original header (~1.9 MB each, dominated by the embedded tokenizer) for metadata-exact reconstruction — 2.6% of the F16 all-in.
+- **Qwen2.5-1.5B** (23 files, build `b3772`): 22.18 GB -> 3.156 GB, **7.03x**; deltas total 59.8 MB.
 
-Worst delta across all 40 files: 0.94% of the file (`IQ2_M`). `Q8_0` was EXACT (zero delta) in both families — it has no scale-search loop, so it is already deterministic everywhere.
+Worst delta across all 40 files: 1.2% of the file (`IQ2_M`). `Q8_0` was EXACT (zero delta) in both families — it has no scale-search loop, so it is already deterministic everywhere.
 
 ## FAQ
 
@@ -137,6 +137,9 @@ No. Every emitted file is sha256-verified against the original, and ggufpacker r
 
 **Why not just zstd the directory?**
 Because byte compressors get about 1.15x on quantized weights — they are already high-entropy. ggufpacker gets 8.7x because it does not compress the weights, it regenerates them from the source.
+
+**Isn't this what Hugging Face Xet already does?**
+Xet dedups at the byte-chunk level and [reports ~2x on quant ladders](https://huggingface.co/blog/from-chunks-to-blocks) (bartowski's gemma-2-9b-it: 29 quants, 191 GB stored as ~97 GB — there is even a [demo space](https://huggingface.co/spaces/xet-team/quantization-dedup) visualizing it). That 2x is a good measure of how much raw near-duplication a ladder has when you can only match bytes. Regenerating from the source instead of matching bytes is what gets from 2x to ~9x — and it also works on your own disk, not just on the Hub's storage backend.
 
 **Can I run inference directly from a pack?**
 Not directly — a pack is cold storage. But you no longer have to manage the unpacked files yourself: `ggufpacker get pack Q4_K_M` materializes the quant into a local cache (sha256-verified, reconstructed once) and prints its path, so `llama-server -m $(ggufpacker get pack Q4_K_M)` just works, and `ggufpacker exec pack Q4_K_M -- llama-cli -m {} -p "hi"` runs the command for you. The practical pattern still stands: keep your daily-driver quant unpacked (or cached), pack the ladder you rarely touch.

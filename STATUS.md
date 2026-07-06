@@ -168,6 +168,11 @@ end of `get` while never evicting the file being returned.
 
 ## Next
 
+- Header dedup: the demo pack's 17 NEAR files store 32.2 MB of zstd'd
+  original headers (~1.9 MB each, dominated by the embedded tokenizer) next
+  to 32.1 MB of actual deltas — the headers are near-identical across the
+  ladder, so delta-coding them against one base header would nearly halve
+  the non-source stored bytes.
 - Finetune/variant deltas (e.g. abliterated vs base) via weight-level
   delta compression — different discipline, tracked but not scheduled.
 - Single-file `.ggufpack` archive format.

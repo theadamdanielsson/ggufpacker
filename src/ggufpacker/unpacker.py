@@ -210,11 +210,13 @@ def splice_from_regen(store: BlobStore, entry: FileEntry, regen: Path, out_path:
 # -- stats -------------------------------------------------------------------
 
 def human(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024 or unit == "TB":
+    # Binary units with honest labels: the math divides by 1024, so the labels
+    # are KiB/MiB/GiB, not KB/MB/GB.
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024 or unit == "TiB":
             return f"{n:,.1f} {unit}" if unit != "B" else f"{int(n):,} B"
         n /= 1024
-    return f"{n:,.1f} TB"
+    return f"{n:,.1f} TiB"
 
 
 def stats_table(pack_dir: str | Path) -> str:
