@@ -2,6 +2,7 @@
 
 Exit codes: 0 success, 1 usage/environment error, 2 verification refusal
 (a reconstruction did not hash to the manifest value and was not emitted).
+`exec` propagates the child command's exit code (128+signal if it was killed).
 """
 
 from __future__ import annotations
@@ -13,6 +14,15 @@ from . import __version__
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    # `exec` takes an arbitrary child command after `--`; split it off before
+    # argparse sees it so child flags are never parsed as ours.
+    exec_command: list[str] | None = None
+    if argv and argv[0] == "exec" and "--" in argv:
+        i = argv.index("--")
+        argv, exec_command = argv[:i], argv[i + 1:]
+
     ap = argparse.ArgumentParser(
         prog="ggufpacker",
         description="Pack a directory of GGUF quantizations into a compact store; "
@@ -37,6 +47,44 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: path recorded in the pack)")
 
+    p = sub.add_parser(
+        "get",
+        help="materialize one file into the local cache and print its absolute path",
+        description="Resolve an entry exactly like unpack, materialize it into "
+        "$GGUFPACKER_CACHE (default ~/.cache/ggufpacker), and print the verified "
+        "absolute path — the only stdout output, so it composes: "
+        "llama-server -m $(ggufpacker get PACK Q4_K_M). Cache hits are rehash-"
+        "verified (~1-2 s/GB) before the path is printed.",
+    )
+    p.add_argument("pack", help="pack directory")
+    p.add_argument("name", metavar="filename|type",
+                   help="original filename, or a quant type like Q4_K_M")
+    p.add_argument("--llama-quantize", metavar="PATH",
+                   help="llama-quantize binary (default: path recorded in the pack)")
+
+    p = sub.add_parser(
+        "exec",
+        help="materialize into the cache, then run a command on the cached file",
+        description="Run `get`, then execute COMMAND with every literal {} in its "
+        "arguments replaced by the cached path; if no argument contains {}, the "
+        "path is appended as the last argument. The child's exit code is "
+        "propagated. Example: ggufpacker exec PACK Q4_K_M -- llama-cli -m {} -p hi",
+        usage="ggufpacker exec [-h] [--llama-quantize PATH] pack filename|type -- COMMAND...",
+    )
+    p.add_argument("pack", help="pack directory")
+    p.add_argument("name", metavar="filename|type",
+                   help="original filename, or a quant type like Q4_K_M")
+    p.add_argument("--llama-quantize", metavar="PATH",
+                   help="llama-quantize binary (default: path recorded in the pack)")
+
+    p = sub.add_parser("cache", help="inspect or clear the on-demand cache")
+    csub = p.add_subparsers(dest="cache_cmd", required=True)
+    csub.add_parser("ls", help="list cached files (pack, file, size, last used)")
+    c = csub.add_parser("clear", help="remove all cached files, or one pack's")
+    c.add_argument("--pack", metavar="PACK",
+                   help="only remove this pack's entries (pack directory path, "
+                   "recorded pack name, or cache identity prefix)")
+
     p = sub.add_parser("stats", help="show per-file plans, stored cost and ratio")
     p.add_argument("pack", help="pack directory")
 
@@ -46,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="llama-quantize binary (default: path recorded in the pack)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "exec":
+        args.exec_command = exec_command
     try:
         return _dispatch(args)
     except KeyboardInterrupt:
@@ -84,6 +134,43 @@ def _dispatch(args: argparse.Namespace) -> int:
             return 2
         return 0
 
+    if args.cmd == "get":
+        rc, path = _cached_get(args)
+        if rc == 0:
+            print(path)  # the ONLY stdout output: composes with $(...)
+        return rc
+
+    if args.cmd == "exec":
+        import subprocess
+
+        if not args.exec_command:
+            print("error: exec needs a command after '--', e.g. "
+                  "ggufpacker exec PACK Q4_K_M -- llama-server -m {}", file=sys.stderr)
+            return 1
+        rc, path = _cached_get(args)
+        if rc != 0:
+            return rc
+        cmd = [a.replace("{}", str(path)) for a in args.exec_command]
+        if cmd == args.exec_command:  # no {} anywhere: append the path
+            cmd.append(str(path))
+        child = subprocess.run(cmd).returncode
+        return 128 - child if child < 0 else child  # -SIGTERM -> 143, shell style
+
+    if args.cmd == "cache":
+        from .cache import clear, ls_table
+
+        if args.cache_cmd == "ls":
+            print(ls_table())
+            return 0
+        if args.cache_cmd == "clear":
+            n = clear(args.pack)
+            if args.pack and n == 0:
+                print(f"error: nothing cached for {args.pack!r}", file=sys.stderr)
+                return 1
+            print(f"removed {n} cached pack(s)")
+            return 0
+        raise AssertionError(f"unhandled cache command {args.cache_cmd}")
+
     if args.cmd == "stats":
         from .unpacker import stats_table
 
@@ -112,6 +199,22 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 2 if bad else 0
 
     raise AssertionError(f"unhandled command {args.cmd}")
+
+
+def _cached_get(args: argparse.Namespace):
+    """Shared get/exec front half: (exit_code, cached_path|None). Never emits
+    an unverified path; failures mirror unpack (1 usage, 2 refusal)."""
+    from .cache import get
+    from .unpacker import ReconstructError
+
+    try:
+        return 0, get(args.pack, args.name, llama_quantize=args.llama_quantize)
+    except (FileNotFoundError, LookupError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1, None
+    except ReconstructError as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 2, None
 
 
 if __name__ == "__main__":
