@@ -38,6 +38,8 @@ A publisher ships 15-25 quant variants per model. Every one of them is a determi
 pip install ggufpacker
 ```
 
+(Python 3.11+. A v0 pack is a *directory* named `*.ggufpack` — manifest, source blob, per-file deltas; the single-file archive is planned for v1.)
+
 You also need a `llama-quantize` binary (from a llama.cpp build) and the F16 source present in the directory you pack. ggufpacker invokes `llama-quantize` to prove and later reproduce each file; it does not ship one.
 
 Pack a directory:
@@ -104,6 +106,8 @@ The root cause is floating-point contraction (FMA) in the k-quant scale-search l
 
 - Upstream fix proposal: [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353).
 - Cross-platform evidence (re-runnable on public CI): [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism).
+
+Switching to the deterministic build is also quality-free, measured: Q4_K_M from the default and `-ffp-contract=off` builds score within 0.0007 PPL on wikitext-2 — ~650x below quantization's own ~0.46 PPL cost and below the error estimate ([data](https://github.com/theadamdanielsson/gguf-quant-determinism#quality-effect-none-measurable)).
 
 Once an upstream deterministic build mode lands, the NEAR deltas for future quants can go to zero and packs become portable across machines.
 

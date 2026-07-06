@@ -8,6 +8,7 @@ version = "0.3.0"
 description = "Pack a directory of GGUF quantizations into a compact store; reconstruct every file bit-exact."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["gguf", "llama.cpp", "quantization", "compression", "deduplication", "reproducibility"]
 license = { text = "MIT" }
 authors = [{ name = "Adam Danielsson", email = "the.adam.danielsson@gmail.com" }]
 classifiers = [
@@ -26,6 +27,10 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/theadamdanielsson/ggufpacker"
+Source = "https://github.com/theadamdanielsson/ggufpacker"
+Issues = "https://github.com/theadamdanielsson/ggufpacker/issues"
+Evidence = "https://github.com/theadamdanielsson/gguf-quant-determinism"
+UpstreamPR = "https://github.com/ggml-org/llama.cpp/pull/25353"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
