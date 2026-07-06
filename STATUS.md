@@ -82,6 +82,15 @@ deprecated `Q4_0_4_x` repack types and all `_L`/`_XL` override variants.
 
 ## Next
 
+- **Multi-model directories**: match each quant to its own F16 source by
+  tensor identity (names/shapes) instead of assuming one source per
+  directory — "pack your whole models folder". Today a second model's
+  ladder falls back to blobs (lossless but no ratio win).
+- `pack --prune --keep <types>`: after a verified pack, delete originals
+  except the quants you actually run.
+- Finetune/variant deltas (e.g. abliterated vs base) via weight-level
+  delta compression — different discipline, tracked but not scheduled.
+
 - LRU size cap for the on-demand cache (`cache` prune to a max total size,
   evicting by last-used mtime) — v0.3.
 - Wire the real-repo round-trip as an opt-in `pytest -m realrepo` job.
