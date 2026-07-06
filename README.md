@@ -84,7 +84,7 @@ If quantization were perfectly reproducible, most files would pack EXACT and the
 
 The root cause is floating-point contraction (FMA) in the k-quant scale-search loops, and a one-flag build change (`-ffp-contract=off` on the quant kernels' compilation unit) makes quantization bit-reproducible across OS, arch, and compiler. That is what the deltas are absorbing today: the gap between the machine that built the published file and the machine you are regenerating on.
 
-- Upstream fix proposal: in preparation (link will land here).
+- Upstream fix proposal: [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353).
 - Cross-platform evidence (re-runnable on public CI): [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism).
 
 Once an upstream deterministic build mode lands, the NEAR deltas for future quants can go to zero and packs become portable across machines.
