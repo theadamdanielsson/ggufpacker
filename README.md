@@ -19,6 +19,17 @@ The check works on anyone's machine, not just the uploader's, because quantizati
 
 Two honest limits. Old quants can't be checked — they were built before the fix, and their exact bytes can't be reproduced anymore. And checking across machines needs the fixed llama.cpp build until the change lands upstream. Details, including the imatrix naming rule, are in [docs/derivation-attestation.md](docs/derivation-attestation.md).
 
+### Check the whole path back to Hugging Face
+
+The check above covers the last step: quant from F16. But the F16 is a derived file too — it was converted from the safetensors the model author published on Hugging Face. That conversion also produces identical bytes everywhere (no fix needed; proven on the same public CI), so it gets the same treatment. `attest-conversion` proves an F16 came from a specific published snapshot, and `verify-chain` checks both proofs together:
+
+```
+ggufpacker attest-conversion model-f16.gguf --source-dir Llama-3.2-1B-Instruct --llama-cpp-dir ~/llama.cpp
+ggufpacker verify-chain model-Q4_K_M.gguf.derivation.json model-f16.gguf.conversion.json --check-source
+```
+
+`verify-chain` first requires the two proofs to be about the same F16 — matched by content, not by filename — then rebuilds both steps. With `--check-source` it also checks the snapshot against what Hugging Face publishes at the recorded revision. A pass means: these quant bytes trace back to that published model, byte for byte, with nothing swapped in anywhere along the way. Details in [docs/conversion-attestation.md](docs/conversion-attestation.md).
+
 ## Store 16 GiB of quants in 1.8 GiB
 
 A publisher ships 15-25 quant files per model, all made from the same source. So don't store every file — store the source once, plus a short recipe per file, and rebuild on demand. Measured on a real repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files went from 16.0 GiB to 1.8 GiB (exact: 17,157,953,114 -> 1,964,806,736 bytes). The originals were deleted, and all 17 quants were rebuilt from the pack — every one matched the original Hugging Face file exactly, in 283 seconds total.

@@ -162,6 +162,103 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: $PATH lookup)")
 
+    p = sub.add_parser(
+        "attest-conversion",
+        help="prove an F16 derives bit-exactly from a safetensors snapshot",
+        description="Re-run convert_hf_to_gguf.py on the snapshot directory, "
+        "byte-compare to F16, and only on a sha256 match write an in-toto "
+        "Statement recording the conversion: every snapshot file digest-pinned "
+        "(the input closure), the directory name (a conversion input), the "
+        "converter identity, the output digest. Refuses (exit 2) if the "
+        "conversion does not reproduce the file. Chains to a quant attestation "
+        "by the F16 digest: see verify-chain.",
+    )
+    p.add_argument("f16", help="the F16 .gguf to attest")
+    p.add_argument("--source-dir", required=True, metavar="DIR",
+                   help="the safetensors snapshot the F16 was converted from; "
+                   "the directory NAME is itself a conversion input (metadata "
+                   "heuristics parse it) and is recorded verbatim")
+    p.add_argument("--llama-cpp-dir", metavar="DIR",
+                   help="llama.cpp checkout holding convert_hf_to_gguf.py")
+    p.add_argument("--converter", metavar="PATH",
+                   help="explicit path to convert_hf_to_gguf.py")
+    p.add_argument("--python", metavar="PATH",
+                   help="python that runs the converter (default: this one); "
+                   "its environment must import the converter's deps")
+    p.add_argument("--llama-cpp-ref", metavar="REF",
+                   help="llama.cpp tag/commit of the converter, recorded as-is "
+                   "(default: read from the checkout's git HEAD)")
+    p.add_argument("--model-name", metavar="NAME",
+                   help="--model-name passed to the converter, if the original "
+                   "conversion used one (it changes general.name)")
+    p.add_argument("--source-uri", metavar="PURL",
+                   help="canonical identity of the snapshot, purl form, e.g. "
+                   "pkg:huggingface/HuggingFaceTB/SmolLM2-135M")
+    p.add_argument("--source-revision", metavar="REV",
+                   help="the published revision (commit) the snapshot was "
+                   "downloaded at; with --source-uri enables "
+                   "`verify-conversion --check-source`")
+    p.add_argument("--timeout", type=float, default=3600.0, metavar="SECONDS",
+                   help="bound on the re-derivation conversion run (default 3600)")
+    p.add_argument("-o", "--output", metavar="PATH",
+                   help="where to write the statement (default: F16.conversion.json)")
+
+    p = sub.add_parser(
+        "verify-conversion",
+        help="re-derive an attested F16 from its snapshot and byte-compare",
+        description="Load an attestation written by `attest-conversion`, locate "
+        "the snapshot by its attested directory name (next to the attestation "
+        "by default), check every closure digest, refuse on files outside the "
+        "closure, re-run the conversion, and compare the output sha256 to the "
+        "attested subject digest. Exit 0 = proven; exit 2 = refused/mismatch.",
+    )
+    p.add_argument("attestation", help="the .conversion.json statement")
+    p.add_argument("--dir", metavar="DIR",
+                   help="directory holding the attested snapshot (default: the "
+                   "attestation's directory)")
+    p.add_argument("--llama-cpp-dir", metavar="DIR",
+                   help="llama.cpp checkout holding convert_hf_to_gguf.py")
+    p.add_argument("--converter", metavar="PATH",
+                   help="explicit path to convert_hf_to_gguf.py")
+    p.add_argument("--python", metavar="PATH",
+                   help="python that runs the converter (default: this one)")
+    p.add_argument("--check-source", action="store_true",
+                   help="also require the attested weights digest to equal the "
+                   "published file at the attested source uri/revision "
+                   "(huggingface.co, checked via the /raw/ LFS pointer)")
+    p.add_argument("--timeout", type=float, default=3600.0, metavar="SECONDS",
+                   help="bound on the re-derivation conversion run (default 3600)")
+
+    p = sub.add_parser(
+        "verify-chain",
+        help="verify a quant back to its Hugging Face snapshot via two "
+        "linked attestations",
+        description="Require the quant attestation's baseModel digest to equal "
+        "the conversion attestation's subject digest (content links the chain), "
+        "then re-derive both edges: snapshot -> F16 -> quant. With "
+        "--check-source, the snapshot itself is anchored to its published "
+        "Hugging Face revision — the whole path back to the trust root. "
+        "Exit 0 = both edges proven; exit 2 = refused/broken.",
+    )
+    p.add_argument("quant_attestation", help="the .derivation.json statement")
+    p.add_argument("conversion_attestation", help="the .conversion.json statement")
+    p.add_argument("--dir", metavar="DIR",
+                   help="directory holding the attested files (default: each "
+                   "attestation's own directory)")
+    p.add_argument("--llama-quantize", metavar="PATH",
+                   help="llama-quantize binary (default: $PATH lookup)")
+    p.add_argument("--llama-cpp-dir", metavar="DIR",
+                   help="llama.cpp checkout holding convert_hf_to_gguf.py")
+    p.add_argument("--converter", metavar="PATH",
+                   help="explicit path to convert_hf_to_gguf.py")
+    p.add_argument("--python", metavar="PATH",
+                   help="python that runs the converter (default: this one)")
+    p.add_argument("--check-source", action="store_true",
+                   help="anchor the chain root: require the attested snapshot "
+                   "weights digest to equal the published file on huggingface.co")
+    p.add_argument("--timeout", type=float, default=3600.0, metavar="SECONDS",
+                   help="bound on each re-derivation run (default 3600)")
+
     p = sub.add_parser("stats", help="show per-file plans, stored cost and ratio")
     p.add_argument("pack", help="pack directory")
 
@@ -334,6 +431,97 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"REFUSED: {e}", file=sys.stderr)
             return 2
         print("verified: re-derivation reproduces the attested sha256 bit-exact")
+        return 0
+
+    if args.cmd == "attest-conversion":
+        import json as _json
+
+        from .attest import AttestError
+        from .conversion_attest import attest_conversion
+        from .converter import ConvertError
+
+        try:
+            result = attest_conversion(
+                args.f16,
+                source_dir=args.source_dir,
+                llama_cpp_dir=args.llama_cpp_dir,
+                converter=args.converter,
+                python=args.python,
+                llama_cpp_ref=args.llama_cpp_ref,
+                source_uri=args.source_uri,
+                source_revision=args.source_revision,
+                model_name=args.model_name,
+                timeout=args.timeout,
+                log=lambda m: print(m, file=sys.stderr),
+            )
+        except (FileNotFoundError, ConvertError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except AttestError as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        out = args.output or f"{args.f16}.conversion.json"
+        with open(out, "w") as f:
+            _json.dump(result.statement, f, indent=1)
+            f.write("\n")
+        print(f"proven: convert_hf_to_gguf reproduces "
+              f"{result.statement['subject'][0]['name']} bit-exact "
+              f"({result.seconds:.1f}s); attestation written to {out}",
+              file=sys.stderr)
+        return 0
+
+    if args.cmd == "verify-conversion":
+        from .attest import AttestationInvalid, VerifyFailed
+        from .conversion_attest import verify_conversion
+        from .converter import ConvertError
+
+        try:
+            verify_conversion(
+                args.attestation,
+                llama_cpp_dir=args.llama_cpp_dir,
+                converter=args.converter,
+                python=args.python,
+                search_dir=args.dir,
+                timeout=args.timeout,
+                check_source=args.check_source,
+                log=lambda m: print(m, file=sys.stderr),
+            )
+        except (FileNotFoundError, ConvertError, OSError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except (AttestationInvalid, VerifyFailed) as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        print("verified: re-derivation reproduces the attested sha256 bit-exact")
+        return 0
+
+    if args.cmd == "verify-chain":
+        from .attest import AttestationInvalid, VerifyFailed
+        from .conversion_attest import verify_chain
+        from .converter import ConvertError
+        from .quantizer import QuantizeError
+
+        try:
+            verify_chain(
+                args.quant_attestation,
+                args.conversion_attestation,
+                llama_quantize=args.llama_quantize,
+                llama_cpp_dir=args.llama_cpp_dir,
+                converter=args.converter,
+                python=args.python,
+                search_dir=args.dir,
+                timeout=args.timeout,
+                check_source=args.check_source,
+                log=lambda m: print(m, file=sys.stderr),
+            )
+        except (FileNotFoundError, ConvertError, QuantizeError, OSError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        except (AttestationInvalid, VerifyFailed) as e:
+            print(f"REFUSED: {e}", file=sys.stderr)
+            return 2
+        print("chain verified: snapshot -> F16 -> quant, both edges "
+              "re-derived bit-exact")
         return 0
 
     if args.cmd == "stats":

@@ -170,5 +170,7 @@ Field semantics:
   (or an out-of-band check of `baseModel.digest` against the publisher),
   the statement proves derivation from the attested bytes, not from a
   canonical model.
-- **One transform.** Conversion, sharding, and merges are plausibly
-  attestable the same way but are not in v0.
+- **One transform per statement.** The safetensors → F16 conversion has its
+  own sibling predicate, [gguf-conversion/v0](conversion-attestation.md);
+  `verify-chain` links the two by the F16 digest and verifies the whole
+  path snapshot → F16 → quant. Sharding and merges are not attested yet.

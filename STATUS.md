@@ -1,8 +1,40 @@
 # ggufpacker v0 status
 
-Updated: 2026-07-07 (v0.4.2)
+Updated: 2026-07-07 (v0.5.0)
 
 ## Done
+
+- **Conversion attestations + the chain (v0.5.0)**: the sibling predicate
+  `gguf-conversion/v0` (safetensors snapshot -> F16), licensed by the
+  conversion determinism proof (gguf-quant-determinism conversion.yml:
+  convert_hf_to_gguf at a pinned commit is bit-reproducible across
+  OS/arch/Python/numpy/torch, dense + MoE, resharded inputs).
+  - `attest-conversion` proves-then-emits: re-runs the converter on the
+    snapshot, byte-compares, refuses otherwise. The statement pins the
+    WHOLE input closure — every non-hidden snapshot file (name, sha256,
+    size), the directory name verbatim (parsed into general.* header
+    fields), the converter identity (script sha256, gitRef, Python,
+    key library versions). `--source-uri/--source-revision` anchor the
+    snapshot to its published HF revision.
+  - `verify-conversion` re-derives-or-refuses: closure digests checked
+    first, files OUTSIDE the attested closure refuse too (an unattested
+    README.md changes the output), then re-convert + byte-compare, with
+    the same TAMPER-EVIDENT vs INCONCLUSIVE split and `--check-source`
+    (primary .safetensors vs HF `/raw/` LFS pointer).
+  - `verify-chain` = the trust-root deliverable: requires the quant
+    statement's baseModel digest to EQUAL the conversion statement's
+    subject digest (content links the chain; checked on parsed statements
+    before any subprocess), then re-derives both edges. Exit 0 = quant
+    bytes trace to the published snapshot; `--check-source` anchors the
+    root to huggingface.co.
+  - Same 0.4.2 hardening discipline on the new loader: traversal-safe
+    closure names, buildIdentity required, recipe.command validated and
+    the recovered `--model-name` pattern-checked before it reaches argv,
+    `reDerivedDigest == subject` enforced.
+  - 34 new tests (182 total), hermetic via a fake converter that mirrors
+    the real input-closure semantics (dir name, file bytes, --model-name);
+    chain tests run the real llama-quantize. Spec:
+    docs/conversion-attestation.md.
 
 - **Attestation hardening (v0.4.2)**, from an adversarial red-team of 0.4.1:
   - Identity anchoring: `attest --source-uri/--source-download-url` record
@@ -222,9 +254,9 @@ end of `get` while never evicting the file being returned.
 - `attest --sign` (optional `ggufpacker[sign]` extra): sigstore-python
   `StatementBuilder` -> keyless DSSE bundle `<model>.gguf-derivation.sigstore.json`
   (the `sigstore attest` CLI cannot carry custom predicates).
-- Sibling predicate `gguf-conversion/v0` (safetensors -> F16): environment
-  pinning via key library versions + a lockfile digest; chains to the quant
-  statement by the F16 digest. Extends the proof to the HF trust root.
+- Conversion attestation extensions: per-file `--check-source` anchoring
+  (v0 anchors the primary .safetensors only), a lockfile digest in
+  buildIdentity, and PyTorch `.bin` snapshots if ever CI-proven.
 - Reusable `verify-gguf` GitHub Action (builds llama.cpp from pinned source,
   so no prebuilt binary in the trust path) + a live shields endpoint badge
   fed by scheduled verification runs.
