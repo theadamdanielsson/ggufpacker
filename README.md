@@ -1,23 +1,27 @@
 # ggufpacker
 
-Check that a GGUF quant is actually what it claims to be — and store whole quant ladders as recipes instead of files. Same machinery for both: a quant is a deterministic function of its F16 source, so it can be re-derived and byte-compared instead of trusted.
+Check that a GGUF quant really comes from the model it claims — and store a whole set of quants as one small pack that can rebuild every file, byte for byte.
 
-## Prove a quant derives from its base model
+Both work for the same reason: a quant is not an original. It's produced from a source model by a fixed procedure, so it can be rebuilt and compared instead of trusted.
 
-Today there is no way to check that a published quant was honestly produced from the model it names. That gap is exploitable: a quant can behave clean in full precision and only misbehave after quantization ([Egashira et al., ICML 2025](https://arxiv.org/abs/2505.23786) — 88.7% success injecting insecure code this way). Signing doesn't close it (it proves who uploaded the bytes, not where they came from), and statistical fingerprinting says "probably derived", not "this file is exactly what the recipe produces".
+## Check a quant against its source
 
-`attest` closes it for artifacts published from now on. It re-derives the quant from its source, byte-compares, and only on a sha256 match writes an [in-toto statement](docs/derivation-attestation.md) recording the derivation. `verify-attestation` re-runs the recipe and refuses on any mismatch — a poisoned or modified quant fails verification:
+When you download a quant today, you are trusting whoever uploaded it. There is no way to check the file was actually made from the model on the label. That gap is exploitable: researchers have shown a model can be tuned to behave normally at full precision and only turn malicious after quantization, passing the standard checks on the way ([Egashira et al., ICML 2025](https://arxiv.org/abs/2505.23786)).
+
+ggufpacker closes that gap for new uploads. `attest` rebuilds the quant from the original model, checks that every byte matches, and only then writes a small proof file recording what was made from what. `verify-attestation` is the other side: it reads a proof file, rebuilds the quant on your machine, and refuses if anything is off. A modified or mislabeled file fails the check.
 
 ```
 ggufpacker attest model-Q4_K_M.gguf --source model-f16.gguf --imatrix model.imatrix
 ggufpacker verify-attestation model-Q4_K_M.gguf.derivation.json
 ```
 
-This works across machines, not just on the attester's box: quantization is bit-reproducible across OS/arch/compiler with a one-flag build change (proposed upstream in [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353)). The whole loop runs on public CI in [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism): a statement attested on macOS/arm64/clang is verified bit-exact on Linux/x86_64/gcc from the statement plus the public F16 alone — the 770 MB quant file is never transferred — and a tampered statement is refused. Limits and the imatrix portability rule are in the [spec](docs/derivation-attestation.md); the main one: old quants can't be attested (they were built with FP contraction on, on unknown machines), so the verifiable corpus starts with what gets published deterministically from here.
+The check works on anyone's machine, not just the uploader's, because quantization can be made to produce identical bytes everywhere — a one-flag llama.cpp fix proposed upstream in [#25353](https://github.com/ggml-org/llama.cpp/pull/25353). The whole loop runs on public CI in [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism): a proof made on a Mac is checked on a Linux machine that has only the proof file and the public source model. The quant itself — 770 MB — is never sent anywhere; 2 KB of JSON stands in for it. And a tampered proof is refused.
 
-## Pack a ladder: 16.0 GiB -> 1.8 GiB, every file back bit-exact
+Two honest limits. Old quants can't be checked — they were built before the fix, and their exact bytes can't be reproduced anymore. And checking across machines needs the fixed llama.cpp build until the change lands upstream. Details, including the imatrix naming rule, are in [docs/derivation-attestation.md](docs/derivation-attestation.md).
 
-The same fact — quants re-derive from the F16 — means there is no reason to store 15-25 near-duplicate files. Measured on a real published repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files, one `.ggufpack` store, manifest 12.4 KiB. Exact bytes: 17,157,953,114 -> 1,964,806,736 (8.73x). Originals deleted, all 17 quants regenerated from the pack, 17/17 sha256 identical to the original Hugging Face files, in 283 seconds.
+## Store 16 GiB of quants in 1.8 GiB
+
+A publisher ships 15-25 quant files per model, all made from the same source. So don't store every file — store the source once, plus a short recipe per file, and rebuild on demand. Measured on a real repo (`bartowski/Llama-3.2-1B-Instruct-GGUF`, llama.cpp `b3821`): 19 files went from 16.0 GiB to 1.8 GiB (exact: 17,157,953,114 -> 1,964,806,736 bytes). The originals were deleted, and all 17 quants were rebuilt from the pack — every one matched the original Hugging Face file exactly, in 283 seconds total.
 
 | File | Original | Plan | Stored | Recipe |
 |------|---------:|------|-------:|--------|
@@ -59,7 +63,7 @@ Pack a directory:
 ggufpacker pack ./Llama-3.2-1B-Instruct-GGUF -o llama-1b.ggufpack --llama-quantize /path/to/llama-quantize
 ```
 
-Once the pack has completed — every plan proven at pack time — you can let it delete the originals in the same command. `--prune` removes the quant files the pack can regenerate (each deletion is re-verified against the pack first; source F16/BF16 and imatrix files are never deleted), and `--keep` holds back the quants you actually run:
+You can let the pack delete the originals in the same command. `--prune` only removes files the pack has just proven it can rebuild, and re-checks everything once more right before deleting. The source model and imatrix are never deleted. `--keep` holds back the quants you actually run:
 
 ```
 ggufpacker pack ./Llama-3.2-1B-Instruct-GGUF -o llama-1b.ggufpack --prune --keep Q4_K_M
@@ -73,7 +77,7 @@ ggufpacker stats llama-1b.ggufpack
 
 ### Multi-model directories
 
-A directory can hold several models' ladders at once — "pack your whole models folder". Files are grouped by tensor identity (the names + shapes in the GGUF header), and each quant is matched to *its own* model's F16 source; per-model imatrix files associate by filename prefix. When two sources are indistinguishable even by tensor identity (a base model and a finetune with identical tensor maps), the filename prefix breaks the tie, and anything still ambiguous is stored as a whole-file blob rather than guessed — never wrong, worst case stored bigger. `stats` shows per-model subtotals for such packs, and `--keep Q4_K_M` keeps every model's Q4_K_M.
+A directory can hold several models at once — pack your whole models folder. Each quant is matched to its own model's source by comparing the tensors inside the files, not by trusting filenames. When two sources look identical from the inside (a base model and a finetune, say), the filename breaks the tie, and anything still ambiguous is stored whole rather than guessed: never wrong, worst case a bit bigger. `stats` shows per-model subtotals, and `--keep Q4_K_M` keeps every model's Q4_K_M.
 
 Regenerate a single quant (by type or by filename). Output is always sha256-verified against the original; ggufpacker refuses to emit a file on mismatch:
 
@@ -81,15 +85,15 @@ Regenerate a single quant (by type or by filename). Output is always sha256-veri
 ggufpacker unpack llama-1b.ggufpack Q4_K_M -o Q4_K_M.gguf
 ```
 
-Or skip managing output files: `get` materializes the quant into a local cache (`~/.cache/ggufpacker`, override with `$GGUFPACKER_CACHE`) and prints the verified absolute path — and nothing else — on stdout, so it composes:
+Or skip managing output files entirely: `get` rebuilds the quant into a local cache and prints its path — nothing else — so you can use it inline:
 
 ```
 llama-server -m $(ggufpacker get llama-1b.ggufpack Q4_K_M)
 ```
 
-Repeat calls serve straight from the cache after an integrity rehash (~1–2 s per GB; that rehash is the guarantee the path holds verified bytes). `ggufpacker exec llama-1b.ggufpack Q4_K_M -- llama-cli -m {} -p "hi"` does the same and runs the command, substituting `{}` with the cached path (appended as the last argument if no `{}` is present) and propagating its exit code. Inspect or reclaim space with `ggufpacker cache ls` / `ggufpacker cache clear [--pack PACK]`.
+Repeat calls come straight from the cache after a quick hash check (a second or two per GB — that check is what guarantees the path holds good bytes). `ggufpacker exec llama-1b.ggufpack Q4_K_M -- llama-cli -m {} -p "hi"` does the same and then runs the command for you, with `{}` standing in for the cached file. `ggufpacker cache ls` and `cache clear` inspect and empty the cache.
 
-The cache can also keep itself under a size cap: `ggufpacker cache prune --max-size 20G` evicts least-recently-used files (by mtime, which every hit touches) until the total fits, and setting `GGUFPACKER_CACHE_MAX=20G` applies the same eviction automatically at the end of every `get` — after materializing, and never evicting the file `get` is about to return.
+The cache can also keep itself under a size limit: `ggufpacker cache prune --max-size 20G` deletes the least-recently-used files until it fits, and setting `GGUFPACKER_CACHE_MAX=20G` does that automatically after every `get` (never deleting the file it's about to hand you).
 
 Re-verify the whole store end to end:
 
@@ -99,14 +103,15 @@ ggufpacker verify llama-1b.ggufpack
 
 ### Derivation attestations
 
-Covered up top; the statement records source digest, imatrix digest, recipe,
-build identity, and output digest. Two notes that matter in practice:
-statistical fingerprinting (e.g. Cisco's Model Provenance Kit) works on any
-existing file but says "probably derived" — an attestation is byte-exact but
-only exists for artifacts quantized deterministically from now on. And the
-imatrix must be passed as a bare cwd-relative filename when quantizing, or the
-artifact isn't portable (llama-quantize embeds the path string in the header;
-`attest` refuses and explains when it hits this). Full spec:
+Covered up top. The proof file records what the quant was made from (source
+and imatrix, each pinned by hash), the exact recipe, which build made it, and
+the result hash. Two practical notes. First, tools like Cisco's Model
+Provenance Kit guess a file's origin statistically and work on anything
+already published — a proof file is exact, but only exists for files made
+with one from now on. Second, when quantizing with an imatrix, pass just the
+filename from its own directory (not a full path): llama-quantize writes the
+path you typed into the output file, so a full path makes the result
+machine-specific. `attest` refuses and explains when it hits this. Full spec:
 [docs/derivation-attestation.md](docs/derivation-attestation.md).
 
 ## How it works
@@ -123,14 +128,14 @@ Every plan is executed and hash-verified **at pack time**, before it is recorded
 
 ## Why the deltas exist at all
 
-If quantization were perfectly reproducible, most files would pack EXACT and the deltas would be zero. They are not, and the reason is a finding worth reading on its own: GGUF quantization is **not** reproducible across machines. The same F16, the same imatrix, the same llama.cpp tag (`b3821`), and the same quant type produce different bytes on a Linux/x86_64 build versus a macOS/arm64 build — in one case 113 of 147 tensors differed, 0.196% of bytes. Locally it is perfectly deterministic (multithread equals single-thread, byte-identical); the divergence is cross-machine.
+If quantization were perfectly reproducible, most files would pack EXACT and the deltas would be zero. They are not, because GGUF quantization turns out **not** to be reproducible across machines: the same source, same imatrix, same llama.cpp version and same quant type produce different bytes on a Linux box than on a Mac (in one measurement, 113 of 147 tensors differed — about 0.2% of the bytes). On a single machine it is perfectly deterministic; the differences only appear across machines.
 
-The root cause is floating-point contraction (FMA) in the k-quant scale-search loops, and a one-flag build change (`-ffp-contract=off` on the quant kernels' compilation unit) makes quantization bit-reproducible across OS, arch, and compiler. That is what the deltas are absorbing today: the gap between the machine that built the published file and the machine you are regenerating on.
+The cause is a compiler optimization: on some hardware the compiler fuses a multiply and an add into one instruction, which rounds slightly differently, which flips near-tie choices inside the quantizer. Turning that optimization off for one source file (`-ffp-contract=off`) makes quantization produce identical bytes everywhere. The deltas are absorbing exactly that gap today — the difference between the machine that built the published file and yours.
 
 - Upstream fix proposal: [ggml-org/llama.cpp#25353](https://github.com/ggml-org/llama.cpp/pull/25353).
-- Cross-platform evidence, re-runnable on public CI: [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism). The CI matrix tests the fix two ways: strict builds of tag `b3821` (all five quant legs — including IQ4_XS and an imatrix leg — bit-identical across x86_64/gcc and arm64/clang), and **the #25353 patch itself applied to pinned llama.cpp master with default flags otherwise** — also bit-identical cross-arch, with no measurable slowdown (single-threaded quantize timings came out slightly *faster* on the patched build on both runners; treat as noise). A default MSVC build at the same commit emits exactly the patched hashes (current MSVC does not contract at its default `/fp:precise`), so in that CI matrix gcc/Linux, clang/macOS, and MSVC/Windows all produce one hash set per quant.
+- Evidence, re-runnable on public CI: [gguf-quant-determinism](https://github.com/theadamdanielsson/gguf-quant-determinism). Without the fix, Linux and macOS builds produce different bytes from identical inputs. With it — including a CI job that applies the actual #25353 patch to current llama.cpp — Linux/gcc, macOS/clang, and Windows/MSVC all produce the same bytes for every quant type tested, with no measurable slowdown (the patched build actually timed slightly faster; treat that as noise).
 
-Switching to the deterministic build is also quality-free, measured: Q4_K_M from the default and `-ffp-contract=off` builds score within 0.0007 PPL on wikitext-2 — ~650x below quantization's own ~0.46 PPL cost and below the error estimate ([data](https://github.com/theadamdanielsson/gguf-quant-determinism#quality-effect-none-measurable)).
+The fix costs nothing in model quality, and that was measured rather than assumed: the two builds' Q4_K_M outputs score within 0.0007 perplexity of each other on wikitext-2 — about 650x smaller than the quality cost of quantization itself, and well inside measurement noise ([data](https://github.com/theadamdanielsson/gguf-quant-determinism#quality-effect-none-measurable)).
 
 Once an upstream deterministic build mode lands, the NEAR deltas for future quants can go to zero and packs become portable across machines.
 
