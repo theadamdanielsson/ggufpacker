@@ -53,7 +53,9 @@ https://github.com/theadamdanielsson/ggufpacker/attestation/gguf-derivation/v0
  "predicateType": "https://github.com/theadamdanielsson/ggufpacker/attestation/gguf-derivation/v0",
  "predicate": {
   "baseModel": {"name": "Llama-3.2-1B-Instruct-f16.gguf",
-                "digest": {"sha256": "<source sha256>"}, "sizeBytes": 2479595360},
+                "digest": {"sha256": "<source sha256>"}, "sizeBytes": 2479595360,
+                "uri": "pkg:huggingface/bartowski/Llama-3.2-1B-Instruct-GGUF@<commit>",
+                "downloadLocation": "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/<commit>/Llama-3.2-1B-Instruct-f16.gguf"},
   "recipe": {
    "quantType": "Q4_K_M", "outputFormat": "gguf", "useImatrix": true,
    "command": "llama-quantize --imatrix Llama-3.2-1B-Instruct.imatrix <baseModel> <output> Q4_K_M",
@@ -82,10 +84,24 @@ Field semantics:
 - **subject** — exactly one entry: the quant file, named by filename, keyed by
   sha256. `subject.digest.sha256 == predicate.reproducibility.reDerivedDigest.sha256`
   is the machine-checkable core: the attester re-derived and matched before
-  emitting.
+  emitting. Verifiers enforce the equality; a statement where they disagree is
+  refused as self-contradictory.
 - **baseModel / recipe.imatrix** — the derivation inputs, digest-pinned. The
   imatrix is an *input blob*, not a derivation (its generation is
   inference-based and not bit-deterministic); it is pinned, never re-derived.
+- **baseModel.uri / downloadLocation** — the canonical identity anchor
+  (purl form `pkg:huggingface/<org>/<repo>@<commit>` plus a concrete resolve
+  URL). This matters: without it, the statement proves the quant derives from
+  *the attested bytes* — it does not prove those bytes are the model the
+  filename suggests. An attacker can honestly attest a quant of their own
+  poisoned F16 under a familiar name. `verify-attestation --check-source`
+  closes this by requiring the attested digest to equal the published file's
+  digest at the attested location (for Hugging Face, checked via the `/raw/`
+  LFS pointer — no model download). Attest with `--source-uri` and
+  `--source-download-url` whenever the base is published.
+- **File names** — always plain sibling filenames. Verifiers reject names
+  containing path separators or `..`; attested files are only ever looked up
+  inside the verification directory.
 - **recipe** — the llama-quantize invocation minus machine-local paths.
   `tokenEmbeddingType` / `outputTensorType` appear when the quant is a
   base-type-plus-override variant (bartowski `_L`/`_XL` style).
@@ -100,14 +116,24 @@ Field semantics:
 
 ## Verification procedure
 
-1. Parse the statement; require this predicate type and exactly one subject.
-2. Locate `baseModel` (and `imatrix` if `useImatrix`) by attested name;
-   require their sha256 digests to match. If the subject file itself is
-   present, require its sha256 to match too (tampered artifact ≠ derivation gap).
+1. Parse the statement; require this predicate type, exactly one subject,
+   well-formed digests, safe file names, and `reDerivedDigest == subject`.
+   Anything else refuses before touching the filesystem.
+2. Locate `baseModel` (and `imatrix` if `useImatrix`) by attested name inside
+   the verification directory; require their sha256 digests to match. If the
+   subject file itself is present, require its sha256 to match too (tampered
+   artifact ≠ derivation gap). With `--check-source`, also require the
+   attested `baseModel` digest to equal the published file at its attested
+   `downloadLocation`.
 3. Run the recipe with a llama-quantize build (ideally a deterministic build
-   of `builder.buildIdentity.gitRef`).
-4. Byte-compare: sha256(output) must equal `subject.digest.sha256`.
-   Anything else is a refusal, exit 2.
+   of `builder.buildIdentity.gitRef`), bounded by a timeout — statements are
+   untrusted input.
+4. Byte-compare: sha256(output) must equal `subject.digest.sha256`. On
+   mismatch, the report distinguishes two findings: with the *attesting
+   binary itself* (same `binarySha256`), a mismatch is tamper-evident — the
+   attested file cannot be the output of the attested recipe; with a
+   different binary, it is inconclusive unless the attester claimed a
+   deterministic build. Either way: refusal, exit 2.
 
 ## Relation to adjacent work
 
@@ -135,6 +161,14 @@ Field semantics:
   patch from #25353, buildable today; frictionless once merged upstream).
   Same-binary verification works with any build.
 - **Statements are unsigned.** An attestation proves derivation, not
-  authorship. Wrap in DSSE + sigstore for signatures.
+  authorship. For signatures, note that the `sigstore attest` CLI cannot
+  carry a custom predicate (it accepts only the two SLSA predicate types);
+  use the sigstore-python API (`StatementBuilder` accepts any
+  `predicate_type`) or `cosign attest-blob --type <this predicate URI>` to
+  produce a `.sigstore.json` bundle.
+- **Identity is only as strong as the anchor.** Without `--check-source`
+  (or an out-of-band check of `baseModel.digest` against the publisher),
+  the statement proves derivation from the attested bytes, not from a
+  canonical model.
 - **One transform.** Conversion, sharding, and merges are plausibly
   attestable the same way but are not in v0.

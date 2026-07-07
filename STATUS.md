@@ -1,8 +1,38 @@
 # ggufpacker v0 status
 
-Updated: 2026-07-06 (v0.4.0)
+Updated: 2026-07-07 (v0.4.2)
 
 ## Done
+
+- **Attestation hardening (v0.4.2)**, from an adversarial red-team of 0.4.1:
+  - Identity anchoring: `attest --source-uri/--source-download-url` record
+    the base model's canonical identity (purl + resolve URL);
+    `verify-attestation --check-source` requires the attested digest to
+    equal the published file's (HF `/raw/` LFS-pointer check, no download).
+    Closes the laundering gap where an attacker honestly attests a quant of
+    their own poisoned F16 under a familiar filename — previously the
+    statement proved derivation-from-those-bytes with the root identity
+    only implied by the name. Docs now state the distinction explicitly.
+  - Strict statement validation before anything touches the filesystem or
+    argv: safe sibling-only file names (no separators/`..`/absolute),
+    hex-validated digests, `quantType`/override types pattern-checked (no
+    flag injection), `reDerivedDigest == subject` enforced (was written but
+    never checked), malformed nested fields refuse cleanly instead of
+    raising KeyError tracebacks.
+  - Re-derivation bounded by `--timeout` (default 3600 s) — statements are
+    untrusted input; a hanging recipe is killed and reported as exit 1.
+  - Mismatch reporting split: same-binary mismatch is TAMPER-EVIDENT (the
+    attesting binary itself cannot reproduce the attested bytes); a
+    different-binary mismatch is INCONCLUSIVE, qualified by whether the
+    attester claimed a deterministic build. Previously one message blamed
+    the build in both cases.
+  - Spec correction: `sigstore attest` CLI cannot carry custom predicates
+    (SLSA types only) — signing goes through the sigstore-python API or
+    `cosign attest-blob`; docs fixed.
+  - Known deferral: `deterministic: true` remains attester-asserted (a
+    known-answer self-test needs per-gitRef golden hashes; tracked in Next).
+  - 22 new tests (148 total); both published real statements load clean
+    under the stricter parser.
 
 - **Derivation attestations (v0.4.0)**: `attest` proves a quant derives
   bit-exactly from a source (re-derive + sha256 match, refuse otherwise) and
@@ -186,6 +216,18 @@ end of `get` while never evicting the file being returned.
 
 ## Next
 
+- `deterministic: true` as a proven claim: a known-answer self-test in
+  `attest` (tiny pinned source + recipe -> per-gitRef golden hash) so the
+  flag can only be written by a binary that just demonstrated determinism.
+- `attest --sign` (optional `ggufpacker[sign]` extra): sigstore-python
+  `StatementBuilder` -> keyless DSSE bundle `<model>.gguf-derivation.sigstore.json`
+  (the `sigstore attest` CLI cannot carry custom predicates).
+- Sibling predicate `gguf-conversion/v0` (safetensors -> F16): environment
+  pinning via key library versions + a lockfile digest; chains to the quant
+  statement by the F16 digest. Extends the proof to the HF trust root.
+- Reusable `verify-gguf` GitHub Action (builds llama.cpp from pinned source,
+  so no prebuilt binary in the trust path) + a live shields endpoint badge
+  fed by scheduled verification runs.
 - Header dedup: the demo pack's 17 NEAR files store 32.2 MB of zstd'd
   original headers (~1.9 MB each, dominated by the embedded tokenizer) next
   to 32.1 MB of actual deltas — the headers are near-identical across the

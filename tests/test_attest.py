@@ -177,18 +177,33 @@ def test_verify_refuses_on_tampered_subject_file(attested, qbin: str, capsys):
 
 @needs_quantize
 def test_verify_refuses_on_forged_digest(attested, qbin: str, capsys):
-    """Editing the attested digest breaks BOTH the on-disk subject check and
-    re-derivation — the forged claim can never verify."""
+    """Two forgery shapes, both refused. Editing only the subject digest
+    contradicts reDerivedDigest and is refused at load, before any quantize
+    runs. Editing both digests consistently survives loading but fails
+    re-derivation — and because the verifying binary IS the attesting binary,
+    the refusal is reported as tamper-evident, not as a build mismatch."""
     model_dir, quant, statement = attested
-    data = json.loads(statement.read_text())
+    original = statement.read_text()
+
+    data = json.loads(original)
     data["subject"][0]["digest"]["sha256"] = "0" * 64
+    statement.write_text(json.dumps(data))
+    capsys.readouterr()
+    rc = cli_main(["verify-attestation", str(statement), "--llama-quantize", qbin])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "contradicts itself" in err
+
+    data = json.loads(original)
+    data["subject"][0]["digest"]["sha256"] = "0" * 64
+    data["predicate"]["reproducibility"]["reDerivedDigest"]["sha256"] = "0" * 64
     statement.write_text(json.dumps(data))
     quant.unlink()  # even without the artifact present, re-derivation refuses
     capsys.readouterr()
     rc = cli_main(["verify-attestation", str(statement), "--llama-quantize", qbin])
     err = capsys.readouterr().err
     assert rc == 2
-    assert "re-derivation does not reproduce" in err
+    assert "TAMPER-EVIDENT" in err
 
 
 @needs_quantize

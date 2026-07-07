@@ -19,6 +19,7 @@ succeed only on a binary matching the attester's.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -224,6 +225,8 @@ def attest(
     output_tensor_type: str | None = None,
     llama_cpp_ref: str | None = None,
     deterministic_build: bool = False,
+    source_uri: str | None = None,
+    source_download_url: str | None = None,
     workdir: str | Path | None = None,
     log=print,
 ) -> Attested:
@@ -259,12 +262,21 @@ def attest(
             Path(td), log,
         )
 
+    # Canonical identity: `uri` (purl form, e.g. pkg:huggingface/org/model@rev)
+    # plus a concrete downloadLocation lets a verifier anchor the base model to
+    # its published identity instead of trusting the filename. Without them the
+    # statement proves derivation from these bytes, not from a canonical model.
+    base_model: dict[str, Any] = {
+        "name": source_path.name,
+        "digest": {"sha256": sha256_file(source_path)},
+        "sizeBytes": source_path.stat().st_size,
+    }
+    if source_uri:
+        base_model["uri"] = source_uri
+    if source_download_url:
+        base_model["downloadLocation"] = source_download_url
     predicate: dict[str, Any] = {
-        "baseModel": {
-            "name": source_path.name,
-            "digest": {"sha256": sha256_file(source_path)},
-            "sizeBytes": source_path.stat().st_size,
-        },
+        "baseModel": base_model,
         "recipe": _recipe_predicate(recipe, imatrix_path.name if imatrix_path else None),
         "builder": {
             "tool": "ggml-org/llama.cpp/llama-quantize",
@@ -303,7 +315,36 @@ def attest(
     return Attested(statement=statement, recipe=recipe, seconds=seconds)
 
 
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# argv safety for attested strings that reach the llama-quantize command line:
+# type names are alnum/underscore only — no dashes (flag injection), no
+# separators, no whitespace.
+_TYPE_ARG = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+
+def _check_name(path_label: str, name: Any) -> str:
+    """Attested file names are always plain sibling filenames. Anything that
+    could traverse (`..`, separators, absolute paths) is rejected before it
+    reaches a filesystem join — verify must never read outside search_dir."""
+    if (not isinstance(name, str) or not name or name in (".", "..")
+            or "/" in name or "\\" in name or name != name.strip()
+            or Path(name).is_absolute()):
+        raise AttestationInvalid(f"{path_label}: unsafe file name {name!r}")
+    return name
+
+
+def _check_digest(path_label: str, ref: Any) -> str:
+    sha = ref.get("digest", {}).get("sha256") if isinstance(ref, dict) else None
+    if not isinstance(sha, str) or not _HEX64.match(sha):
+        raise AttestationInvalid(f"{path_label}: missing or malformed sha256 digest")
+    return sha
+
+
 def load_statement(path: str | Path) -> dict[str, Any]:
+    """Parse and strictly validate a statement. Every field that later
+    reaches the filesystem or the quantize argv is validated HERE, so the
+    verifier can treat the returned structure as safe. Any statement this
+    version does not fully understand is a refusal, never a guess."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"no such attestation: {path}")
@@ -319,12 +360,50 @@ def load_statement(path: str | Path) -> dict[str, Any]:
             f"(this ggufpacker verifies {PREDICATE_TYPE!r})"
         )
     subs = data.get("subject")
-    if (not isinstance(subs, list) or len(subs) != 1
-            or not subs[0].get("digest", {}).get("sha256")):
-        raise AttestationInvalid(f"{path}: expected exactly one subject with a sha256")
+    if not isinstance(subs, list) or len(subs) != 1 or not isinstance(subs[0], dict):
+        raise AttestationInvalid(f"{path}: expected exactly one subject")
+    _check_name(str(path), subs[0].get("name"))
+    subject_sha = _check_digest(f"{path}: subject", subs[0])
+
+    pred = data.get("predicate")
+    if not isinstance(pred, dict):
+        raise AttestationInvalid(f"{path}: predicate is not an object")
     for key in ("baseModel", "recipe", "builder", "reproducibility"):
-        if key not in data.get("predicate", {}):
+        if not isinstance(pred.get(key), dict):
             raise AttestationInvalid(f"{path}: predicate missing {key!r}")
+
+    _check_name(f"{path}: baseModel", pred["baseModel"].get("name"))
+    _check_digest(f"{path}: baseModel", pred["baseModel"])
+
+    recipe = pred["recipe"]
+    qtype = recipe.get("quantType")
+    if not isinstance(qtype, str) or not _TYPE_ARG.match(qtype):
+        raise AttestationInvalid(f"{path}: malformed quantType {qtype!r}")
+    for k in ("tokenEmbeddingType", "outputTensorType"):
+        v = recipe.get(k)
+        if v is not None and (not isinstance(v, str) or not _TYPE_ARG.match(v)):
+            raise AttestationInvalid(f"{path}: malformed {k} {v!r}")
+    if recipe.get("useImatrix"):
+        imx = recipe.get("imatrix")
+        if not isinstance(imx, dict):
+            raise AttestationInvalid(
+                f"{path}: recipe uses an imatrix but attests none"
+            )
+        _check_name(f"{path}: imatrix", imx.get("name"))
+        _check_digest(f"{path}: imatrix", imx)
+
+    # The attester's core assertion is subject == reDerivedDigest; a statement
+    # where they disagree is self-contradictory and refused outright.
+    rd = pred["reproducibility"].get("reDerivedDigest")
+    if rd is not None:
+        rd_sha = rd.get("sha256") if isinstance(rd, dict) else None
+        if not isinstance(rd_sha, str) or not _HEX64.match(rd_sha):
+            raise AttestationInvalid(f"{path}: malformed reDerivedDigest")
+        if rd_sha != subject_sha:
+            raise AttestationInvalid(
+                f"{path}: reDerivedDigest does not equal the subject digest — "
+                f"the statement contradicts itself"
+            )
     return data
 
 
@@ -332,6 +411,8 @@ def verify(
     statement_path: str | Path,
     llama_quantize: str | None = None,
     search_dir: str | Path | None = None,
+    timeout: float | None = 3600.0,
+    check_source: bool = False,
     log=print,
 ) -> None:
     """Re-derive and byte-compare. Raises VerifyFailed/FileNotFoundError/
@@ -339,7 +420,12 @@ def verify(
 
     Files (base model, imatrix, and optionally the quant itself) are located
     by their attested names in search_dir (default: the attestation's
-    directory) and their digests are checked before the quantize runs."""
+    directory) and their digests are checked before the quantize runs.
+    `timeout` bounds the quantize subprocess (statements are untrusted input;
+    a re-derivation should not run unbounded). `check_source` additionally
+    resolves the attested baseModel downloadLocation/uri and requires the
+    published digest to equal the attested one — without it, the statement
+    proves derivation from the attested bytes, not from a canonical model."""
     import tempfile
 
     statement_path = Path(statement_path).resolve()
@@ -349,6 +435,9 @@ def verify(
     pred = data["predicate"]
     subject = data["subject"][0]
     want_sha = subject["digest"]["sha256"]
+
+    if check_source:
+        _check_source_identity(pred["baseModel"], log)
 
     src = base / pred["baseModel"]["name"]
     if not src.is_file():
@@ -413,6 +502,7 @@ def verify(
             cwd=imatrix.parent if imatrix else None,
             token_embedding_type=r.get("tokenEmbeddingType"),
             output_tensor_type=r.get("outputTensorType"),
+            timeout=timeout,
         )
         if res.returncode != 0:
             raise VerifyFailed(
@@ -421,9 +511,81 @@ def verify(
             )
         got = sha256_file(out)
     if got != want_sha:
+        # A mismatch with the ATTESTER'S OWN binary is a different finding
+        # than a mismatch with some other build: same deterministic function,
+        # digest-checked inputs, different output — the attested file cannot
+        # be the output of the attested recipe. Report them distinctly.
+        if attested_bin and attested_bin == quantizer.sha256:
+            raise VerifyFailed(
+                f"TAMPER-EVIDENT: the attesting binary itself "
+                f"(sha256 {attested_bin[:16]}...) re-derives "
+                f"{got[:16]}..., not the attested {want_sha[:16]}... — "
+                f"the attested file is not the output of the attested recipe"
+            )
         raise VerifyFailed(
-            f"re-derivation does not reproduce {subject['name']}: "
-            f"attested {want_sha[:16]}..., re-derived {got[:16]}... "
-            f"(differing llama-quantize builds are the usual cause; the "
-            f"attested binary sha256 is {attested_bin[:16] or 'unrecorded'}...)"
+            f"INCONCLUSIVE mismatch: re-derivation gives {got[:16]}..., "
+            f"attested {want_sha[:16]}... — this verifier's llama-quantize "
+            f"differs from the attesting binary "
+            f"(attested sha256 {attested_bin[:16] or 'unrecorded'}...); "
+            + ("the attester claimed a deterministic build, so a deterministic "
+               "build of the attested gitRef should settle it"
+               if pred["reproducibility"].get("deterministic")
+               else "the attester did not claim a deterministic build, so a "
+               "mismatch on a different binary is expected")
         )
+
+
+_HF_RESOLVE = re.compile(
+    r"^https://huggingface\.co/([\w.-]+/[\w.-]+)/resolve/([\w.-]+)/([^?]+)$"
+)
+
+
+def _check_source_identity(base_model: dict[str, Any], log=print) -> None:
+    """--check-source: require the attested baseModel digest to equal the
+    digest of the published file it names. v0 supports huggingface.co
+    downloadLocation URLs, checked via the /raw/ endpoint: for LFS files that
+    returns a small pointer carrying the sha256, so no model download."""
+    loc = base_model.get("downloadLocation")
+    if not isinstance(loc, str) or not loc:
+        raise AttestationInvalid(
+            "statement has no baseModel.downloadLocation to check against; "
+            "without it the statement proves derivation from the attested "
+            "bytes, not from a canonical published model"
+        )
+    m = _HF_RESOLVE.match(loc)
+    if not m:
+        raise AttestationInvalid(
+            f"--check-source supports huggingface.co resolve URLs only in v0 "
+            f"(got {loc!r})"
+        )
+    repo, rev, filename = m.groups()
+    published = _hf_published_sha256(f"https://huggingface.co/{repo}/raw/{rev}/{filename}")
+    attested = base_model["digest"]["sha256"]
+    if published != attested:
+        raise VerifyFailed(
+            f"baseModel identity check failed: {repo}@{rev}/{filename} "
+            f"publishes sha256 {published[:16]}..., statement attests "
+            f"{attested[:16]}..."
+        )
+    log(f"source identity confirmed: baseModel digest matches "
+        f"{repo}@{rev}/{filename} on huggingface.co")
+
+
+def _hf_published_sha256(raw_url: str) -> str:
+    """sha256 of a Hugging Face file via its /raw/ endpoint: LFS files return
+    a pointer containing the oid; small non-LFS files return their content,
+    which is hashed directly. Separated for testability."""
+    import hashlib
+    import urllib.request
+
+    with urllib.request.urlopen(raw_url, timeout=60) as resp:  # noqa: S310
+        head = resp.read(512)
+        if head.startswith(b"version https://git-lfs"):
+            m = re.search(rb"oid sha256:([0-9a-f]{64})", head)
+            if not m:
+                raise VerifyFailed(f"{raw_url}: LFS pointer without an oid")
+            return m.group(1).decode()
+        h = hashlib.sha256(head)
+        while chunk := resp.read(1 << 20):
+            h.update(chunk)
+        return h.hexdigest()

@@ -128,6 +128,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="assert the binary was built with deterministic quantization "
                    "(-ffp-contract=off on ggml-quants.c; llama.cpp#25353), making the "
                    "attestation verifiable across machines")
+    p.add_argument("--source-uri", metavar="PURL",
+                   help="canonical identity of the base model, purl form, e.g. "
+                   "pkg:huggingface/meta-llama/Llama-3.2-1B-Instruct@<commit>; "
+                   "without it the statement proves derivation from the attested "
+                   "bytes only, not from a canonical published model")
+    p.add_argument("--source-download-url", metavar="URL",
+                   help="where the base model file is published (a huggingface.co "
+                   "resolve URL enables `verify-attestation --check-source`)")
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: $PATH lookup)")
     p.add_argument("-o", "--output", metavar="PATH",
@@ -145,6 +153,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dir", metavar="DIR",
                    help="directory holding the attested files (default: the "
                    "attestation's directory)")
+    p.add_argument("--check-source", action="store_true",
+                   help="also require the attested baseModel digest to equal the "
+                   "published file at its attested downloadLocation (huggingface.co "
+                   "URLs; checked via the /raw/ LFS pointer, no model download)")
+    p.add_argument("--timeout", type=float, default=3600.0, metavar="SECONDS",
+                   help="bound on the re-derivation quantize run (default 3600)")
     p.add_argument("--llama-quantize", metavar="PATH",
                    help="llama-quantize binary (default: $PATH lookup)")
 
@@ -274,6 +288,8 @@ def _dispatch(args: argparse.Namespace) -> int:
                 output_tensor_type=args.output_tensor_type,
                 llama_cpp_ref=args.llama_cpp_ref,
                 deterministic_build=args.deterministic_build,
+                source_uri=args.source_uri,
+                source_download_url=args.source_download_url,
                 log=lambda m: print(m, file=sys.stderr),
             )
         except (FileNotFoundError, QuantizeError) as e:
@@ -305,9 +321,13 @@ def _dispatch(args: argparse.Namespace) -> int:
                 args.attestation,
                 llama_quantize=args.llama_quantize,
                 search_dir=args.dir,
+                timeout=args.timeout,
+                check_source=args.check_source,
                 log=lambda m: print(m, file=sys.stderr),
             )
-        except (FileNotFoundError, QuantizeError) as e:
+        except (FileNotFoundError, QuantizeError, OSError) as e:
+            # OSError covers network failures during --check-source: an
+            # unreachable registry is an environment problem, not a verdict.
             print(f"error: {e}", file=sys.stderr)
             return 1
         except (AttestationInvalid, VerifyFailed) as e:

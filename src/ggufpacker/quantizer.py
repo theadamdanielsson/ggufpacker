@@ -67,11 +67,14 @@ class Quantizer:
         token_embedding_type: str | None = None,
         output_tensor_type: str | None = None,
         cwd: str | Path | None = None,
+        timeout: float | None = None,
     ) -> QuantizeResult:
         """Invoke llama-quantize. `imatrix` is passed VERBATIM: llama-quantize
         embeds that exact string in the output header (quantize.imatrix.file),
         so the string is part of the output bytes. Callers that need portable
-        output pass a bare filename plus `cwd` (the attest path does)."""
+        output pass a bare filename plus `cwd` (the attest path does).
+        `timeout` (seconds) bounds the subprocess — verification runs recipes
+        from untrusted statements and must not hang forever."""
         import time
 
         argv: list[str] = [self.binary]
@@ -83,8 +86,13 @@ class Quantizer:
             argv += ["--output-tensor-type", output_tensor_type]
         argv += [str(src_gguf), str(out_gguf), qtype]
         t0 = time.time()
-        p = subprocess.run(argv, capture_output=True, text=True,
-                           cwd=str(cwd) if cwd else None)
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True,
+                               cwd=str(cwd) if cwd else None, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise QuantizeError(
+                f"llama-quantize exceeded the {timeout:.0f}s timeout"
+            ) from e
         return QuantizeResult(
             returncode=p.returncode,
             seconds=time.time() - t0,
