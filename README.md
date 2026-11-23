@@ -4,6 +4,13 @@ Check that a GGUF quant really comes from the model it claims — and store a wh
 
 Both work for the same reason: a quant is not an original. It's produced from a source model by a fixed procedure, so it can be rebuilt and compared instead of trusted.
 
+## Checked by others
+
+Two groups outside this project have run ggufpacker and the llama.cpp fix it relies on, and both reported the same results.
+
+- **A paper.** [What You Sign Is Not What You Run](https://arxiv.org/abs/2610.19498) (Liu and Tsai, preprint, October 2026) measures how few published GGUF quants a third party can rebuild. It lists ggufpacker and the llama.cpp fix as prior work, reproduces the difference between compilers on its own machines, and recommends that the fix be merged.
+- **A Red Hat Research project.** [aibom-security](https://github.com/RedHatResearch/aibom-security) ran ggufpacker 0.5.0 against its own llama.cpp build as a cross-check of the paper. The write-up is in [issue 26](https://github.com/RedHatResearch/aibom-security/issues/26) and the runnable check is in [smokes/what-you-sign](https://github.com/RedHatResearch/aibom-security/tree/main/smokes/what-you-sign).
+
 ## Check a quant against its source
 
 When you download a quant today, you are trusting whoever uploaded it. There is no way to check the file was actually made from the model on the label. That gap is exploitable: researchers have shown a model can be tuned to behave normally at full precision and only turn malicious after quantization, passing the standard checks on the way ([Egashira et al., ICML 2025](https://arxiv.org/abs/2505.23786)).
